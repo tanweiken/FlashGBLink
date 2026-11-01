@@ -142,6 +142,23 @@ class AdapterTests(unittest.TestCase):
             self.device_module.progress = original
         self.assertEqual(calls, [(100, 0), (0, 1), (50, 1), (100, 1)])
 
+
+    def test_write_rom_skips_ff_without_drifting_the_address(self):
+        writes = []
+        original = self.device_module.write_block
+        self.device_module.write_block = (
+            lambda link, address, data: writes.append((address, bytes(data))))
+        try:
+            self.device._active_cart = self.profile
+            self.device.FW_VAR["BUFFER_SIZE"] = 64
+            payload = b"\xFF" * 4096 + bytes(range(256)) * 16
+            self.device.WriteROM(0, payload, flash_buffer_size=64,
+                                 max_length=4096)
+        finally:
+            self.device_module.write_block = original
+        self.assertEqual(writes[0][0], 4096)
+        self.assertEqual(writes[0][1], payload[4096:8192])
+
     def test_rom_write_progress_is_sent_to_the_payload(self):
         calls = []
         original = self.device_module.progress

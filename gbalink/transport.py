@@ -93,6 +93,7 @@ class Link:
         self.ser.reset_input_buffer()
         self._buffer = bytearray()
         self._cond = threading.Condition()
+        self._lock = threading.RLock()
         self._closed = False
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
@@ -100,7 +101,10 @@ class Link:
     def _read_loop(self):
         while not self._closed:
             try:
-                data = self.ser.read(4096)
+                # Read what is available instead of waiting for a full 4 KiB.
+                # FlashGBX changes the serial timeout, and a blocking 4 KiB
+                # read would delay every small reply until that timeout.
+                data = self.ser.read(max(1, self.ser.in_waiting))
             except Exception:
                 break
             if data:
@@ -116,6 +120,12 @@ class Link:
             pass
 
     def xfer(self, words, timeout=5.0):
+        # FlashGBX can check device liveness from another thread while a
+        # transfer is in progress; a second writer would corrupt the framing.
+        with self._lock:
+            return self._xfer(words, timeout)
+
+    def _xfer(self, words, timeout=5.0):
         frames = _pack_words(words)
         expected = len(words) * 4
         with self._cond:
@@ -145,8 +155,9 @@ class Link:
         return self.xfer([PING], timeout=timeout)[0]
 
     def drain(self):
-        with self._cond:
-            self._buffer.clear()
+        with self._lock:
+            with self._cond:
+                self._buffer.clear()
 
     def resync(self, attempts=3):
         """Re-establish word framing after a short transfer.
@@ -155,20 +166,21 @@ class Link:
         short, so it is fed dummy words: they are either its remaining replies
         or invalid command headers, which it rejects with ST_BAD.
         """
-        self.drain()
-        self.ser.write(_pack_words([0] * RESYNC_WORDS))
-        self.ser.flush()
-        time.sleep(0.05)
-        self.drain()
-        for _ in range(attempts):
-            try:
-                word = self.ping(timeout=0.5)
-            except ProtocolError:
-                word = None
-            if word is not None and (word & 0xFFFF0000) == ST_OK:
-                return True
+        with self._lock:
             self.drain()
-        return False
+            self.ser.write(_pack_words([0] * RESYNC_WORDS))
+            self.ser.flush()
+            time.sleep(0.05)
+            self.drain()
+            for _ in range(attempts):
+                try:
+                    word = self.ping(timeout=0.5)
+                except ProtocolError:
+                    word = None
+                if word is not None and (word & 0xFFFF0000) == ST_OK:
+                    return True
+                self.drain()
+            return False
 
     @staticmethod
     def _unrecovered():

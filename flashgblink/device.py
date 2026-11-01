@@ -14,6 +14,7 @@ Use ``python3 flash.py upload`` for that step.
 """
 
 import os
+import time
 
 from FlashGBX.LK_Device import LK_Device
 from FlashGBX.Logging import dprint
@@ -59,6 +60,7 @@ class GbxDevice(LK_Device):
         self._save_read_addr = 0
         self._save_write_addr = 0
         self._command_set = 0
+        self._mode_selected = False
         self._write_active = False
         self._write_total = 0
         self._verify_phase = False
@@ -105,7 +107,7 @@ class GbxDevice(LK_Device):
                 "pcb_name": self.DEVICE_NAME,
                 "pcb_ver": 1,
                 "fw_ver": 15,
-                "fw_dt": "",
+                "fw_dt": "2026-11-01",
                 "cfw_id": "F",
                 "unregistered": False,
                 "cart_mode_switch": False,
@@ -118,6 +120,8 @@ class GbxDevice(LK_Device):
                 "AGB_READ_METHOD": 0,
             }
             self.MODE = "AGB"
+            self._mode_selected = False
+            self.LAST_CHECK_ACTIVE = 0
             self.INFO = {"action": None, "last_action": None, "dump_info": {}}
             self._reset_cursors()
             self.UpdateFlashCarts(flashcarts)
@@ -135,13 +139,18 @@ class GbxDevice(LK_Device):
         return (status & 0xFFFF0000) == ST_OK
 
     def CheckActive(self):
+        if self.LAST_CHECK_ACTIVE and time.monotonic() < self.LAST_CHECK_ACTIVE + 1:
+            return True
         if self.DEVICE is None or self.LINK is None:
             return False
         try:
             status = self.LINK.ping(timeout=0.3)
         except Exception:
             return False
-        return (status & 0xFFFF0000) == ST_OK
+        if (status & 0xFFFF0000) == ST_OK:
+            self.LAST_CHECK_ACTIVE = time.monotonic()
+            return True
+        return False
 
     def IsConnected(self):
         return self.CheckActive()
@@ -172,13 +181,21 @@ class GbxDevice(LK_Device):
     def GetSupportedModes(self):
         return ["AGB"]
 
+    def SetTimeout(self, seconds=1):
+        # LK_Device would change the serial port timeout; the reader thread
+        # and Link.xfer manage their own timeouts, so keep them independent.
+        self.DEVICE_TIMEOUT = max(0.1, seconds)
+
     def GetMode(self):
-        return self.MODE
+        # FlashGBX reads the cartridge only after the platform has been
+        # selected.  Report no mode until SetMode() has been called.
+        return self.MODE if self._mode_selected else None
 
     def SetMode(self, mode, delay=0.1):
         if mode != "AGB":
             raise ProtocolError("FlashGBLink supports AGB cartridges only")
         self.MODE = "AGB"
+        self._mode_selected = True
         self.FW_VAR["CART_MODE"] = 2
 
     # -- capabilities -------------------------------------------------------
@@ -558,6 +575,48 @@ class GbxDevice(LK_Device):
         self._plan_key = key
         dprint("FlashGBLink: write plan for {} ({} bytes, {} commands)"
                .format(name, chunk, len(words) // 4))
+
+    def WriteROM(self, address, buffer, flash_buffer_size=False,
+                 skip_init=False, rumble_stop=False, max_length=0x400):
+        """Program a ROM buffer at an explicit address.
+
+        FlashGBX's own WriteROM relies on the device firmware advancing its
+        address counter across FLASH_PROGRAM frames.  With CompareSectors
+        enabled it skips all-0xFF chunks, so a host-side counter drifts.  Send
+        every chunk at its known address instead.
+        """
+        length = min(len(buffer), min(max_length, self.MAX_BUFFER_WRITE))
+        if length == 0:
+            return False
+        if flash_buffer_size:
+            self._set_fw_variable("BUFFER_SIZE", flash_buffer_size)
+        self._install_plan()
+        skipped = False
+        for offset in range(0, len(buffer), length):
+            chunk = bytes(buffer[offset:offset + length])
+            if chunk and chunk == b"\xFF" * len(chunk):
+                skipped = True
+                continue
+            skipped = False
+            self._program_at(address + offset, chunk)
+            if (rumble_stop and flash_buffer_size
+                    and (offset + length) % flash_buffer_size == 0):
+                self._cart_write(address=0xC4, value=0x00, flashcart=True)
+                self._cart_write(address=0xC6, value=0x00, flashcart=True)
+                rumble_stop = False
+        self.SKIPPING = skipped
+        return None
+
+    def _program_at(self, address, data):
+        if not data:
+            return
+        self._install_plan()
+        unit = self._plan_chunk if self._plan_chunk % 4 == 0 else 4
+        padding = (-len(data)) % unit
+        payload = data + b"\xff" * padding
+        for offset in range(0, len(payload), self._plan_block):
+            block = payload[offset:offset + self._plan_block]
+            write_block(self.LINK, address + offset, block)
 
     def _program(self, data):
         if not data:
