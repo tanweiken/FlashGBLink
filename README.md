@@ -29,6 +29,7 @@ flash.py                standalone CLI (alternative, uses FlashGBX's profiles)
 flashgbx.py             CLI profile loader and FlashGBX CFI adapter
 payload/                GBA-side flasher source
 firmware/               prebuilt gbasend-pico UF2s
+scripts/                plugin installer
 tests/                  hardware-free tests and small profile fixtures
 docs/                   hardware baseline notes
 ```
@@ -68,104 +69,106 @@ flash bank switching (over 32 MiB).
 
 ## Quick start
 
-### 1. Hardware
+### What goes where
 
-- GBA or GBA SP with the cartridge inserted.
-- RP2040 Pico. The firmware does not run on RP2350 or ESP32.
-- Pico to link port: GP0 = GBA SO, GP2 = GBA SC, GP3 = GBA SI, GND, with the
-  1 kOhm series resistor described in the gbasend-rs `DIY.md`.
-- Power the Pico from USB only. Do not connect USB and the link port's VCC at
-  the same time.
+| Piece | Source | Destination | How often |
+|---|---|---|---|
+| Pico firmware | `firmware/gbasend-pico.uf2` | Pico via BOOTSEL | once |
+| GBA payload | `payload/flasher.gba` | GBA RAM via USB | every power-on |
+| FlashGBLink plugin | `flashgblink_plugin.py`, `flashgblink/`, `gbalink/` | FlashGBX `plugins/` directory | once, and after updates |
+| Flashcart profiles | FlashGBX's own database | nothing to copy | already installed |
 
-### 2. Flash the Pico firmware
+The installer below copies exactly the three plugin items. You do not need to
+copy files by hand.
 
-Flash `firmware/gbasend-pico.uf2` once: hold BOOTSEL, plug the Pico into USB,
-copy the UF2 to the mounted `RPI-RP2` drive. It enumerates as a USB serial
-device with VID:PID `2E8A:000A`. See
-[`firmware/README.md`](firmware/README.md) for provenance and checksums.
+### One-time setup
 
-### 3. Build the payload
+1. **Hardware.** GBA or GBA SP with the cartridge inserted, an RP2040 Pico, and
+   the link-port wiring from the gbasend-rs `DIY.md`: GP0 = GBA SO,
+   GP2 = GBA SC, GP3 = GBA SI, GND, with the 1 kOhm series resistor. Power the
+   Pico from USB only; do not connect USB and the link port's VCC together.
+   The firmware does not run on RP2350 or ESP32.
 
-Requires only `arm-none-eabi-gcc` and Python 3 (no devkitPro):
+2. **Flash the Pico once.** Hold **BOOTSEL**, plug the Pico into USB, copy
+   `firmware/gbasend-pico.uf2` to the mounted `RPI-RP2` drive. It reboots as
+   `2E8A:000A`. See [`firmware/README.md`](firmware/README.md) for provenance
+   and checksums.
 
-```sh
-make -C payload
-```
+3. **Host setup.**
 
-Output: `payload/flasher.gba` (about 3.2 KiB). `fix_header.py` pads the image
-and fills the cartridge header (logo and complement check). The payload holds
-the profile's write template, so a new cartridge profile does not need a
-payload rebuild.
+   ```sh
+   python3 -m venv .venv
+   .venv/bin/pip install pyserial FlashGBX
 
-### 4. Host setup
+   git clone https://github.com/nullstalgia/gbasend-rs
+   cargo build --release --manifest-path gbasend-rs/gbasend-cli/Cargo.toml
+   GBASEND=$PWD/gbasend-rs/gbasend-cli/target/release/gbasend
+   ```
 
-```sh
-python3 -m venv .venv
-.venv/bin/pip install pyserial FlashGBX
+   FlashGBLink needs FlashGBX **5.2.1 or newer** for its plugin system. If PyPI
+   still installs an older release, install FlashGBX from its `master` branch.
 
-git clone https://github.com/nullstalgia/gbasend-rs
-cargo build --release --manifest-path gbasend-rs/gbasend-cli/Cargo.toml
-GBASEND=$PWD/gbasend-rs/gbasend-cli/target/release/gbasend
-```
+4. **Build the payload.**
 
-FlashGBLink needs FlashGBX **5.2.1 or newer** for its plugin system. If PyPI
-still installs an older release, install FlashGBX from its `master` branch.
-The GUI's Qt dependencies are not needed for `flash.py`'s use of the library.
+   ```sh
+   make -C payload
+   ```
 
-Check the setup:
+   Output: `payload/flasher.gba` (about 3.2 KiB). Requires only
+   `arm-none-eabi-gcc` and Python 3.
+
+5. **Install the FlashGBLink plugin.**
+
+   ```sh
+   make install-plugin
+   # or: .venv/bin/python3 scripts/install_plugin.py
+   ```
+
+   The script finds the macOS app bundle or the platform FlashGBX config
+   directory and copies `flashgblink_plugin.py`, `flashgblink/` and `gbalink/`
+   into its `plugins/` folder. Useful flags:
+
+   ```sh
+   .venv/bin/python3 scripts/install_plugin.py --dry-run
+   .venv/bin/python3 scripts/install_plugin.py --plugins-dir "/path/to/plugins"
+   .venv/bin/python3 scripts/install_plugin.py --uninstall
+   ```
+
+   If you prefer to copy by hand, copy those three items into the `plugins`
+   directory of FlashGBX's configuration folder (macOS app:
+   `/Applications/FlashGBX.app/Contents/MacOS/config/plugins`; pip/other:
+   `~/.config/FlashGBX/plugins` on Linux, `~/Library/Preferences/FlashGBX/plugins`
+   on macOS, `%LOCALAPPDATA%\FlashGBX\plugins` on Windows). Alternatively, copy
+   only `flashgblink_plugin.py` and set
+   `FLASHGBLINK_ROOT=/path/to/FlashGBLink` so it loads the packages from this
+   checkout.
+
+6. **Start FlashGBX once.** Approve **FlashGBLink** when prompted. The device
+   appears only while the payload is running.
+
+### Every session
+
+1. Insert the cartridge and power the GBA off.
+2. Hold **START+SELECT** and power it on, so the BIOS waits for multiboot.
+3. Upload the payload:
+
+   ```sh
+   .venv/bin/python3 flash.py upload --gbasend $GBASEND
+   ```
+
+4. In FlashGBX: Connect → FlashGBLink, then Detect / Backup ROM / Write ROM /
+   Backup Save / Restore Save. The GBA shows a green write bar, then a cyan
+   verify bar.
+
+The payload stays resident until the GBA is reset or powered off. FlashGBX does
+not upload during device discovery, because the GBA has to be waiting in
+multiboot first.
+
+Check the host setup and installed plugin at any time:
 
 ```sh
 .venv/bin/python3 flash.py doctor --gbasend $GBASEND
 ```
-
-### 5. Upload the payload
-
-Insert the cartridge, then power the GBA on holding **START+SELECT** so the
-BIOS waits for the multiboot upload, and run:
-
-```sh
-.venv/bin/python3 flash.py upload --gbasend $GBASEND
-```
-
-The payload stays resident until the GBA is reset or powered off.
-
-### 6. Install the FlashGBLink plugin
-
-FlashGBX loads plugins from the `plugins` subdirectory of its configuration
-directory. The "appdata" location is shown by `python3 -m FlashGBX --help`
-(`--cfgdir`); typical defaults are `~/.config/FlashGBX` on Linux,
-`~/Library/Preferences/FlashGBX` on macOS and `%LOCALAPPDATA%\FlashGBX` on
-Windows. The macOS release app keeps its configuration at
-`/Applications/FlashGBX.app/Contents/MacOS/config`, so its plugin directory is
-`/Applications/FlashGBX.app/Contents/MacOS/config/plugins`.
-
-Copy the plugin and its two packages into that directory:
-
-```sh
-PLUGINS="/Applications/FlashGBX.app/Contents/MacOS/config/plugins"  # macOS app
-# PLUGINS="$HOME/.config/FlashGBX/plugins"                          # Linux
-mkdir -p "$PLUGINS"
-cp flashgblink_plugin.py "$PLUGINS/"
-cp -R flashgblink gbalink "$PLUGINS/"
-```
-
-Alternatively, copy only `flashgblink_plugin.py` and point it at this checkout:
-
-```sh
-export FLASHGBLINK_ROOT=/path/to/FlashGBLink
-```
-
-Start FlashGBX, approve **FlashGBLink** when prompted, then Connect →
-FlashGBLink. The device only appears while the payload is running; it does not
-upload during FlashGBX's device discovery, because the GBA must already be
-waiting in multiboot.
-
-### 7. Flash or back up
-
-In FlashGBX use the normal **Detect Cartridge**, **Backup ROM**, **Write ROM**,
-**Backup Save** and **Restore Save** actions. Detection selects the profile,
-writes are verified, and the GBA shows the green write bar followed by the cyan
-verify bar.
 
 ## CLI
 

@@ -776,6 +776,19 @@ def doctor(args):
         problems += 1
 
     try:
+        config_dir = find_config_dir(args.config)
+    except ProfileError:
+        config_dir = None
+    if config_dir is not None:
+        plugin = config_dir / "plugins" / "flashgblink_plugin.py"
+        if plugin.is_file():
+            print("plugin: ok (%s)" % plugin)
+        else:
+            print("plugin: MISSING (%s); run "
+                  "`python3 scripts/install_plugin.py`" % plugin.parent)
+            problems += 1
+
+    try:
         import serial
         print("pyserial: ok (%s)" % serial.__version__)
     except ImportError:
