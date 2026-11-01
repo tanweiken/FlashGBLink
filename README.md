@@ -134,6 +134,14 @@ copy files by hand.
    .venv/bin/python3 scripts/install_plugin.py --uninstall
    ```
 
+   If you do not want to run from a checkout, download
+   `FlashGBLink-plugin.zip` from the GitHub Releases page and extract it into the
+   same `plugins` directory. To build that archive locally:
+
+   ```sh
+   make plugin-zip
+   ```
+
    If you prefer to copy by hand, copy those three items into the `plugins`
    directory of FlashGBX's configuration folder (macOS app:
    `/Applications/FlashGBX.app/Contents/MacOS/config/plugins`; pip/other:
@@ -150,11 +158,15 @@ copy files by hand.
 
 1. Insert the cartridge and power the GBA off.
 2. Hold **START+SELECT** and power it on, so the BIOS waits for multiboot.
-3. Upload the payload:
+3. Start the uploader, *then* power on the GBA. The uploader waits for the
+   console (60 seconds by default, or forever with `--handshake-wait 0`):
 
    ```sh
-   .venv/bin/python3 flash.py upload --gbasend $GBASEND
+   .venv/bin/python3 flash.py upload --gbasend $GBASEND --handshake-wait 0
    ```
+
+   Hold **START+SELECT** while switching the GBA on; the payload uploads as soon
+   as the BIOS offers the multiboot handshake.
 
 4. In FlashGBX: Connect → FlashGBLink, then Detect / Backup ROM / Write ROM /
    Backup Save / Restore Save. The GBA shows a green write bar, then a cyan
@@ -163,6 +175,16 @@ copy files by hand.
 The payload stays resident until the GBA is reset or powered off. FlashGBX does
 not upload during device discovery, because the GBA has to be waiting in
 multiboot first.
+
+### Why can't the Pico upload automatically?
+
+The GBA BIOS only listens for multiboot when **START+SELECT** is held at
+power-on. The link port has no reset or boot-mode line, so software cannot put a
+running console into that state. Starting `flash.py upload` first is the
+practical automation: the uploader blocks until the GBA appears, and the only
+manual step is holding the buttons while switching it on. A Pico firmware with
+the payload embedded could remove the PC upload step, but not the button hold on
+unmodified hardware.
 
 Check the host setup and installed plugin at any time:
 
@@ -368,6 +390,8 @@ Special thanks to **akouzoukos**, developer of
   bus-specific profiles (3D Memory, GBAMP, Sintax, Vast Fame).
 - Faster link: remove the Pico's fixed 100 µs per-word delay and replace it with
   flow control (block acknowledgements or a ready line).
+- Pico firmware with the payload embedded, auto-uploading when the BIOS
+  multiboot handshake appears (still requires START+SELECT on stock hardware).
 - Optional web UI for auto-updating a ROM over the link.
 
 ## License

@@ -5,3 +5,4 @@ __pycache__/
 *.gba
 *.map
 *.o
+dist/
