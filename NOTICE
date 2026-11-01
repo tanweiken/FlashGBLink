@@ -1,0 +1,22 @@
+GBA link-port cartridge flasher
+===============================
+
+This project includes or derives from the following work:
+
+FlashGBX
+  https://github.com/Lesserkuma/FlashGBX
+  License: GPL-3.0-or-later
+  The flash chip command sequences in flash.py (M36L0R8060B / Intel command
+  set, from config/fc_AGB_M36L0R806.txt) are derived from FlashGBX's
+  cartridge profile data.
+
+gbasend-rs
+  https://github.com/nullstalgia/gbasend-rs
+  License: MIT OR Apache-2.0
+  The prebuilt gbasend-pico firmware images in firmware/ are unmodified
+  copies from that repository.
+
+Nintendo logo
+  The Game Boy Advance cartridge header embedded in the payload includes the
+  Nintendo logo. It is a trademark of Nintendo and is present only because the
+  console's BIOS requires it to boot the payload.

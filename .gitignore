@@ -1,0 +1,7 @@
+__pycache__/
+.venv/
+.flash-state.json
+*.elf
+*.gba
+*.map
+*.o

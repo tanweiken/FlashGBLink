@@ -1,0 +1,22 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi
+      - run: make -C payload
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            payload/flasher.gba
+            firmware/gbasend-pico.uf2
+            firmware/gbasend-pico-rgb.uf2
