@@ -1,7 +1,9 @@
 """Protocol and CFI tests that do not need hardware."""
 
 import struct
+import tempfile
 import unittest
+from pathlib import Path
 
 import flash
 
@@ -16,6 +18,8 @@ class RecordingLink(flash.Link):
     def xfer(self, words, timeout=5.0):
         self.sent.append(list(words))
         if self.replies:
+            if isinstance(self.replies[0], list):
+                return self.replies.pop(0)
             replies, self.replies = self.replies, []
             return replies
         return [flash.ST_OK] * len(words)
@@ -55,6 +59,27 @@ class FramingTests(unittest.TestCase):
         with self.assertRaises(flash.ProtocolError):
             flash._check_status(0xDEADBEEF)
 
+    def test_progress_frames_the_percent_and_pings(self):
+        link = RecordingLink()
+        flash.progress(link, 42)
+        words = link.sent[0]
+        self.assertEqual(words[0],
+                         (flash.HDR_MAGIC << 24) | (flash.OP_PROGRESS << 8) | 42)
+        self.assertEqual(words[-1], flash.PING)
+
+    def test_progress_phase_selects_the_verify_bar(self):
+        link = RecordingLink()
+        flash.progress(link, 42, phase=1)
+        words = link.sent[0]
+        self.assertEqual(
+            words[0],
+            (flash.HDR_MAGIC << 24) | (1 << 16) | (flash.OP_PROGRESS << 8) | 42)
+
+    def test_progress_clamps_to_the_bar(self):
+        link = RecordingLink()
+        flash.progress(link, 250)
+        self.assertEqual(link.sent[0][0] & 0xFF, 100)
+
 
 def build_cfi_buffer(swap_pins=(), size_log2=25, erase_regions=((0x10000, 255), (0x8000, 4))):
     buffer = bytearray(0x200)
@@ -91,6 +116,57 @@ class CfiTests(unittest.TestCase):
     def test_unknown_signature_is_rejected(self):
         with self.assertRaises(flash.ProtocolError):
             flash.parse_cfi(b"\x00" * 0x200)
+
+
+class SaveTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def path(self, name):
+        return Path(self.tmp.name) / name
+
+    def test_dump_reads_the_save_media_not_the_cartridge(self):
+        link = RecordingLink()
+        flash.save_dump(link, self.path("out.sav"), 8)
+        words = link.sent[0]
+        self.assertEqual(words[1], 0x0E000000)
+        self.assertEqual(words[2], 8)            # byte count, not words
+        self.assertEqual((words[0] >> 8) & 0xFF, flash.OP_READ8)
+        self.assertEqual(self.path("out.sav").stat().st_size, 8)
+
+    def test_dump_unpacks_four_bytes_per_reply_word(self):
+        link = RecordingLink([[flash.ST_OK] * 3 + [0x04030201] + [flash.ST_OK]])
+        data = flash.save_dump(link, self.path("out.sav"), 4)
+        self.assertEqual(data, b"\x01\x02\x03\x04")
+
+    def test_restore_writes_bytes_not_16_bit_lanes(self):
+        source = self.path("in.sav")
+        source.write_bytes(b"\x01\x02\x03\x04\x05")
+        link = RecordingLink([flash.ST_OK] * 8)
+        flash.save_restore(link, source, verify=False, show_progress=False)
+        words = link.sent[0]
+        self.assertEqual((words[0] >> 8) & 0xFF, flash.OP_WRITE8)
+        self.assertEqual(words[1], 0x0E000000)
+        self.assertEqual(words[2], 5)            # odd length is fine
+        self.assertEqual(words[3:5], [0x04030201, 0x00000005])
+
+    def test_restore_refuses_a_file_larger_than_the_save(self):
+        source = self.path("big.sav")
+        source.write_bytes(b"\x00" * 8)
+        with self.assertRaises(flash.ProtocolError):
+            flash.save_restore(RecordingLink(), source, size=4, verify=False,
+                               show_progress=False)
+
+    def test_restore_verify_reports_the_first_mismatch(self):
+        source = self.path("in.sav")
+        source.write_bytes(b"\x01\x02\x03\x04")
+        # Replay zeros on the read-back so the comparison fails.
+        link = RecordingLink([[flash.ST_OK] * 5, [flash.ST_OK],
+                              [0, 0, 0, 0, flash.ST_OK]])
+        with self.assertRaises(flash.ProtocolError) as caught:
+            flash.save_restore(link, source, verify=True, show_progress=False)
+        self.assertIn("at 0x0 (expected 01, got 00)", str(caught.exception))
 
 
 if __name__ == "__main__":

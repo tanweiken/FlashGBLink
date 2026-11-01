@@ -1,16 +1,22 @@
-GBA link-port cartridge flasher
-===============================
+FlashGBLink
+===========
 
 This project includes or derives from the following work:
 
 FlashGBX
+  Author: Lesserkuma
   https://github.com/Lesserkuma/FlashGBX
   License: GPL-3.0-or-later
-  The flash chip command sequences in flash.py (M36L0R8060B / Intel command
-  set, from config/fc_AGB_M36L0R806.txt) are derived from FlashGBX's
-  cartridge profile data.
+  The four small profile fixtures under tests/fixtures/ are copied from
+  FlashGBX's config/ directory for the hardware-free tests; the plugin and CLI
+  use FlashGBX's installed profile database at runtime. The profile loader and command template handling in flashgbx.py
+  and flash.py follow FlashGBX's Flashcart and CLI behaviour. Cartridge
+  detection and CFI decoding call FlashGBX's Flashcart and CFI classes at
+  runtime. The M36L0R8060B / Intel command sequences used by the original
+  flasher came from the same profile data.
 
 gbasend-rs
+  Author: nullstalgia
   https://github.com/nullstalgia/gbasend-rs
   License: MIT OR Apache-2.0
   The prebuilt gbasend-pico firmware images in firmware/ are unmodified

@@ -2,15 +2,17 @@
 """Flash a GBA cartridge through the link port.
 
 Uploads ``payload/flasher.gba`` into the GBA with gbasend, then talks to it over
-the same gbasend-pico USB serial bridge.  The GBA payload only performs 16-bit
-cartridge stores/loads and a soft reset; every flash command sequence is
-composed here, so the payload does not need to be rebuilt for a new cartridge.
+the same gbasend-pico USB serial bridge.  The GBA payload performs 16-bit
+cartridge stores/loads and a soft reset; the host selects a FlashGBX profile and
+sends its command template, so the payload does not need to be rebuilt for a new
+cartridge.
 
 Quick start (cart inserted, GBA off):
 
-    python3 tools/gba_flasher/flash.py upload      # hold START+SELECT, power on
-    python3 tools/gba_flasher/flash.py id
-    python3 tools/gba_flasher/flash.py cfi
+    python3 flash.py upload      # hold START+SELECT, power on
+    python3 flash.py detect
+    python3 flash.py id
+    python3 flash.py cfi
 
 Requires pyserial and the ``gbasend`` CLI from
 https://github.com/nullstalgia/gbasend-rs.
@@ -23,286 +25,486 @@ import shutil
 import struct
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 
-
-def _require_serial():
-    try:
-        import serial
-        from serial.tools import list_ports
-    except ImportError:  # pragma: no cover - environment dependent
-        raise SystemExit(
-            "pyserial is required: python3 -m pip install pyserial")
-    return serial, list_ports
-
-GBASEND_VID = 0x2E8A
-GBASEND_PID = 0x000A
-
-PING = 0x5A5A5A5A
-HDR_MAGIC = 0x5A
-
-OP_WRITE_SEQ = 0x20
-OP_READ = 0x30
-OP_BOOT = 0x40
-
-ST_OK = 0xA5A50000
-ST_BAD = 0xA5A500E1
-
-PAYLOAD = Path(__file__).resolve().parent / "payload" / "flasher.gba"
+from flashgbx import (ProfileError, ProtocolError, cfi_sector_regions,
+                      find_config_dir, find_profile, load_profiles,
+                      normalize_cfi, parse_cfi, relocate_commands, swap_bits)
+from gbalink import (ADDR_ABS, ADDR_PA, ADDR_SA, BLOCK_BYTES, HDR_MAGIC,
+                     OP_BOOT, OP_PROGRESS, OP_READ, OP_READ8, OP_SET_PLAN,
+                     OP_WRITE8, OP_WRITE_BLOCK, OP_WRITE_SEQ, PAYLOAD, PING,
+                     PLAN_MAX_COMMANDS, RESYNC_WORDS, ST_BAD, ST_OK,
+                     VAL_BS, VAL_CONST, VAL_PD, WAIT_ABS, WAIT_NONE, WAIT_PD,
+                     WAIT_SA, Link, PlanError, TransferError, _check_status,
+                     _hex, _pack_words, find_port, progress, read_region,
+                     single_write_waits, write_block)
+from gbalink.plan import encode_write_plan as plan_encode_write_plan
+from gbalink.plan import prepare_write as plan_prepare_write
 
 # -- M36L0R8060B / Intel command set, from FlashGBX fc_AGB_M36L0R806.txt --
+# Kept as the fallback for `id` and `cfi` when no profile is loaded.
 ID_SEQ = [(0, 0x90)]
 CFI_SEQ = [(0xAA, 0x98)]
-SECTOR_ERASE_VALUES = (0x60, 0xD0, 0x20, 0xD0)
 
-OP_WRITE_BLOCK = 0x50
-BLOCK_BYTES = 4096
-SECTOR_BYTES = 0x20000
-RESET_EVERY = 0x100000
 STATE_PATH = Path(__file__).resolve().parent / ".flash-state.json"
 FINGERPRINT_BYTES = 4096
-
-
-class ProtocolError(RuntimeError):
-    pass
-
-
-def find_port(explicit=None):
-    if explicit:
-        return explicit
-    _, list_ports = _require_serial()
-    for info in list_ports.comports():
-        if info.vid == GBASEND_VID and info.pid == GBASEND_PID:
-            return info.device
-    raise SystemExit(
-        "gbasend-pico serial port not found; pass --port or connect the device")
-
-
-def _pack_words(words):
-    # The GBA's SIO shifts each 32-bit word MSB-first, so the serial byte
-    # order is big-endian for both directions.
-    return b"".join(struct.pack(">I", word & 0xFFFFFFFF) for word in words)
-
-
-class Link:
-    """Word exchange over the gbasend-pico transparent SPI bridge."""
-
-    def __init__(self, port, baud, verbose=False):
-        serial, _ = _require_serial()
-        self.verbose = verbose
-        self.ser = serial.Serial(port, baudrate=baud, timeout=0.05,
-                                 write_timeout=5)
-        self._buffer = bytearray()
-        self._cond = threading.Condition()
-        self._closed = False
-        self._reader = threading.Thread(target=self._read_loop, daemon=True)
-        self._reader.start()
-
-    def _read_loop(self):
-        while not self._closed:
-            try:
-                data = self.ser.read(4096)
-            except Exception:
-                break
-            if data:
-                with self._cond:
-                    self._buffer += data
-                    self._cond.notify_all()
-
-    def close(self):
-        self._closed = True
-        try:
-            self.ser.close()
-        except Exception:
-            pass
-
-    def xfer(self, words, timeout=5.0):
-        frames = _pack_words(words)
-        expected = len(words) * 4
-        with self._cond:
-            self._buffer.clear()
-        self.ser.write(frames)
-        self.ser.flush()
-        deadline = time.monotonic() + timeout
-        with self._cond:
-            while len(self._buffer) < expected:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise ProtocolError(
-                        "timeout waiting for %d reply bytes (got %d)"
-                        % (expected, len(self._buffer)))
-                self._cond.wait(remaining)
-            raw = bytes(self._buffer[:expected])
-            del self._buffer[:expected]
-        result = list(struct.unpack(">%dI" % len(words), raw))
-        if self.verbose:
-            print("tx", _hex(words))
-            print("rx", _hex(result))
-        return result
-
-    def ping(self, timeout=5.0):
-        return self.xfer([PING], timeout=timeout)[0]
-
-    def handshake(self, timeout=8.0):
-        """Wait for the payload to answer after a multiboot upload."""
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                word = self.ping(timeout=0.5)
-            except ProtocolError:
-                time.sleep(0.05)
-                continue
-            if (word & 0xFFFF0000) == 0xA5A50000:
-                return word
-            time.sleep(0.05)
-        raise ProtocolError(
-            "no payload response; upload it with `flash.py upload` first")
-
-    def write_seq(self, pairs, timeout=5.0):
-        for start in range(0, len(pairs), 200):
-            chunk = pairs[start:start + 200]
-            words = [(HDR_MAGIC << 24) | (OP_WRITE_SEQ << 8) | len(chunk)]
-            for address, value in chunk:
-                words.append(address & 0xFFFFFFFF)
-                words.append(value & 0xFFFF)
-            words.append(PING)
-            status = self.xfer(words, timeout=timeout)[-1]
-            _check_status(status)
-
-    def read_words(self, address, count, timeout=10.0):
-        words = [(HDR_MAGIC << 24) | (OP_READ << 8), address & 0xFFFFFFFF,
-                 count & 0xFFFFFFFF]
-        words += [0] * count
-        words.append(PING)
-        replies = self.xfer(words, timeout=timeout)
-        _check_status(replies[-1])
-        return replies[3:3 + count]
-
-    def boot(self):
-        self.ser.write(_pack_words([(HDR_MAGIC << 24) | (OP_BOOT << 8)]))
-        self.ser.flush()
-
-
-def _check_status(word):
-    if word == ST_BAD:
-        raise ProtocolError("payload rejected command (0x%08X)" % word)
-    if (word & 0xFFFFFF00) == ST_OK:
-        return
-    raise ProtocolError("unexpected status 0x%08X" % word)
-
-
-def _hex(words):
-    return " ".join("%08X" % word for word in words)
+CFI_BYTES = 0x400
 
 
 # -- cartridge operations -----------------------------------------------------
 
-def cart_reset(link, address=0):
-    # Intel command state is per bank; reset in the bank being accessed.
-    link.write_seq([(address, 0x50), (address, 0xFF)])
+def _read_bytes(link, address, length):
+    words = link.read_words(address, (length + 3) // 4)
+    return b"".join(struct.pack("<I", word) for word in words)[:length]
 
 
-def cart_id(link):
-    cart_reset(link)
-    link.write_seq(ID_SEQ)
-    time.sleep(0.01)
-    words = link.read_words(0, 2)
-    cart_reset(link)
-    return b"".join(struct.pack("<I", word) for word in words)
+def _reset_pairs(profile, address):
+    if profile is None:
+        return [(address, 0x50), (address, 0xFF)]
+    rows = relocate_commands(profile.command("reset"), address)
+    return [(row[0], row[1]) for row in rows]
 
 
-def cart_cfi(link):
-    link.write_seq(CFI_SEQ)
-    time.sleep(0.05)
-    words = link.read_words(0, 0x80)
-    cart_reset(link)
-    return b"".join(struct.pack("<I", word) for word in words)
+def cart_reset(link, profile=None, address=None, max_address=None):
+    """Return the flash chip to read-array mode.
+
+    With ``address`` the reset goes into that bank only; with ``reset_every``
+    the chip is reset at every bank boundary, which is what Intel parts with
+    per-bank command state need after a power-up or a partial operation.
+    """
+    if address is not None:
+        targets = [address]
+    elif profile is not None and profile.reset_every:
+        limit = profile.flash_size
+        if max_address is not None:
+            limit = min(limit, max_address) if limit else max_address
+        targets = list(range(0, limit or 0, profile.reset_every)) or [0]
+    else:
+        targets = [0]
+    for target in targets:
+        pairs = _reset_pairs(profile, target)
+        if pairs:
+            link.write_seq(pairs)
 
 
-def sector_erase(link, address, timeout=12.0):
-    link.write_seq([(address, value) for value in SECTOR_ERASE_VALUES])
-    deadline = time.monotonic() + timeout
+def cart_id(link, profile=None):
+    address = profile.read_identifier_at if profile else 0
+    sequences = []
+    if profile is not None:
+        sequences.append(profile.command("read_identifier"))
+    else:
+        sequences.extend([ID_SEQ, [(0xAAA, 0xA9), (0x555, 0x56), (0xAAA, 0x90)]])
     last = None
-    while time.monotonic() < deadline:
-        # Intel status register: SR.7 set while the erase is in progress.
-        last = link.read_words(address, 1)[0] & 0xFFFF
-        if last == 0x80:
-            cart_reset(link, address)
-            if (link.read_words(address, 1)[0] & 0xFFFF) == 0xFFFF:
-                return True
-            raise ProtocolError(
-                "sector 0x%X erased but reads back 0x%04X"
-                % (address, link.read_words(address, 1)[0] & 0xFFFF))
-        time.sleep(0.05)
-    raise ProtocolError(
-        "sector 0x%X did not erase within %.1fs (last status 0x%04X)"
-        % (address, timeout, last))
-
-
-def single_write(link, address, value, timeout=2.0):
-    link.write_seq([(address, 0x70), (address, 0x10), (address, value)])
-    deadline = time.monotonic() + timeout
-    last = None
-    while time.monotonic() < deadline:
-        last = link.read_words(address, 1)[0] & 0xFFFF
-        if last & 0x80:
-            cart_reset(link, address)
-            if (link.read_words(address, 1)[0] & 0xFFFF) == value:
-                return True
-            raise ProtocolError(
-                "write 0x%04X to 0x%X did not verify"
-                % (value, address))
-        time.sleep(0.01)
-    raise ProtocolError(
-        "program of 0x%04X at 0x%X timed out (last status 0x%04X)"
-        % (value, address, last))
-
-
-def read_region(link, address, length):
-    out = bytearray()
-    for offset in range(0, length, BLOCK_BYTES):
-        size = min(BLOCK_BYTES, length - offset)
-        words = link.read_words(address + offset, (size + 3) // 4)
-        out += b"".join(struct.pack("<I", word) for word in words)[:size]
-    return bytes(out)
-
-
-def write_block(link, address, data, timeout=10.0):
-    if len(data) > BLOCK_BYTES or len(data) % 4:
-        raise ValueError("block must be 4..%d bytes, word aligned"
-                         % BLOCK_BYTES)
-    words = struct.unpack("<%dH" % (len(data) // 2), data)
-    packed = [words[index] | (words[index + 1] << 16)
-              for index in range(0, len(words), 2)]
-    frame = [(HDR_MAGIC << 24) | (OP_WRITE_BLOCK << 8),
-             address & 0xFFFFFFFF, len(packed)] + packed
-    link.xfer(frame, timeout=timeout)
-    # The payload ignores the link while it programs, so wait for its OK.
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            status = link.ping(timeout=0.5)
-        except ProtocolError:
+    for pairs in sequences:
+        if not pairs:
             continue
-        if (status & 0xFFFFFF00) == ST_OK:
-            return
+        cart_reset(link, profile, address=address)
+        before = _read_bytes(link, address, 8)
+        link.write_seq(pairs)
         time.sleep(0.01)
-    raise ProtocolError("block write at 0x%X did not complete" % address)
+        after = _read_bytes(link, address, 8)
+        cart_reset(link, profile, address=address)
+        last = after
+        if profile is not None or after != before:
+            return after
+    return last or b""
 
 
-def _sector_hashes(image):
-    return [hashlib.sha256(image[offset:offset + SECTOR_BYTES]).hexdigest()
-            for offset in range(0, len(image), SECTOR_BYTES)]
+def _cfi_pairs(profile):
+    if profile is not None and profile.has_command("read_cfi"):
+        return profile.command("read_cfi")
+    if profile is not None and profile.command_set == "AMD":
+        return [(0xAA, 0x98)]
+    if profile is not None and profile.command_set in ("INTEL", "SHARP"):
+        return [(0, 0x98)]
+    return CFI_SEQ
 
 
-def _load_state(path):
+def cart_cfi(link, profile=None):
+    """Read the raw CFI response (at least 512 bytes)."""
+    address = profile.read_identifier_at if profile else 0
+    cart_reset(link, profile, address=address)
+    link.write_seq(_cfi_pairs(profile))
+    time.sleep(0.05)
+    data = _read_bytes(link, address, CFI_BYTES)
+    cart_reset(link, profile, address=address)
+    return data
+
+
+def read_cfi(link, profile=None):
+    return parse_cfi(cart_cfi(link, profile))
+
+
+def _resolve_address(token, base):
+    if isinstance(token, int):
+        return token
+    for prefix in ("SA+", "PA+"):
+        if isinstance(token, str) and token.startswith(prefix):
+            return base + int(token[len(prefix):], 0)
+    if token in ("SA", "PA"):
+        return base
+    raise ProfileError("unknown address token %r" % (token,))
+
+
+def _resolve_value(token, buffer_size=None, program_data=None):
+    if isinstance(token, int):
+        return token & 0xFFFF
+    if token == "BS":
+        if not buffer_size:
+            raise ProfileError("BS token without a buffer size")
+        return (buffer_size - 1) & 0xFFFF
+    if token == "PD":
+        if program_data is None:
+            raise ProfileError("PD token without program data")
+        return program_data & 0xFFFF
+    raise ProfileError("unknown data token %r" % (token,))
+
+
+def _resolve_wait_address(token, base):
+    # Wait rows use numeric offsets from the operation address.  Commands use
+    # numbers as absolute cartridge addresses.
+    if isinstance(token, int):
+        return base + token
+    return _resolve_address(token, base)
+
+
+def _poll_wait(link, rows, base, program_data=None, timeout=20.0):
+    """Poll each non-null ``*_wait_for`` row until it matches."""
+    for row in rows:
+        if not row or row[0] is None:
+            continue
+        address = _resolve_wait_address(row[0], base)
+        expected = row[1]
+        mask = row[2] if len(row) > 2 and row[2] is not None else 0xFFFF
+        if expected == "PD":
+            if program_data is None:
+                raise ProfileError("wait-for PD without program data")
+            expected = program_data & 0xFFFF
+        deadline = time.monotonic() + timeout
+        last = None
+        while True:
+            last = link.read_words(address, 1)[0] & 0xFFFF
+            if (last & mask) == expected:
+                break
+            if time.monotonic() >= deadline:
+                raise ProtocolError(
+                    "status 0x%04X at 0x%X did not match 0x%04X & 0x%04X "
+                    "within %.1fs"
+                    % (last, address, expected, mask, timeout))
+            time.sleep(0.02)
+
+
+def _single_write_waits(profile):
+    """Wait rows for single-word programming, with a status fallback."""
+    return single_write_waits(
+        profile.command("single_write"),
+        profile.command("single_write_wait_for"),
+        profile.command_set)
+
+
+def _run_sequence(link, commands, waits, base, buffer_size=None,
+                  program_data=None, timeout=20.0):
+    """Send a command sequence one row at a time, polling after each row.
+
+    Profile wait tables are aligned with their command table, so a wait after
+    an early command (for example the first unlock write on some Intel parts)
+    must happen before the next command is issued.
+    """
+    for index, row in enumerate(commands):
+        address = _resolve_address(row[0], base)
+        value = _resolve_value(row[1], buffer_size, program_data)
+        link.write_seq([(address, value)])
+        if index < len(waits):
+            _poll_wait(link, [waits[index]], base,
+                       program_data=program_data, timeout=timeout)
+
+
+def sector_erase(link, address, profile=None, timeout=30.0):
+    if profile is None:
+        pairs = [(address, 0x60), (address, 0xD0),
+                 (address, 0x20), (address, 0xD0)]
+        rows = [[None, None, None]] * 3 + [["SA", 0x80, 0xFFFF]]
+    else:
+        pairs = profile.command("sector_erase")
+        rows = profile.command("sector_erase_wait_for")
+    _run_sequence(link, pairs, rows, address, timeout=timeout)
+    cart_reset(link, profile, address=address)
+    value = link.read_words(address, 1)[0] & 0xFFFF
+    if value != 0xFFFF:
+        raise ProtocolError(
+            "sector 0x%X erased but reads back 0x%04X" % (address, value))
+    return True
+
+
+def single_write(link, address, value, profile=None, timeout=10.0):
+    if profile is None:
+        pairs = [(address, 0x70), (address, 0x10), (address, value)]
+        rows = [[None, None, None], [None, None, None],
+                ["SA", 0x80, 0x80]]
+    else:
+        pairs = profile.command("single_write")
+        rows = _single_write_waits(profile)
+    _run_sequence(link, pairs, rows, address,
+                  program_data=value, timeout=timeout)
+    cart_reset(link, profile, address=address)
+    last = link.read_words(address, 1)[0] & 0xFFFF
+    if last != (value & 0xFFFF):
+        raise ProtocolError(
+            "write 0x%04X to 0x%X did not verify (read 0x%04X)"
+            % (value, address, last))
+    return True
+
+
+# -- FlashGBX profile autodetection -------------------------------------------
+
+class Detection:
+    """Result of matching a cartridge against the loaded profiles."""
+
+    def __init__(self, profile=None, flash_id=None, cfi=None, candidates=None,
+                 ambiguous=False, baseline=None, id_buffer=None):
+        self.profile = profile
+        self.flash_id = flash_id
+        self.cfi = cfi
+        self.candidates = list(candidates or [])
+        self.ambiguous = ambiguous
+        self.baseline = baseline
+        self.id_buffer = id_buffer
+
+
+def _flashcart(profile, link, verbose=False):
+    """Build a FlashGBX Flashcart whose bus calls go over the payload."""
+    try:
+        from FlashGBX.Flashcart import Flashcart
+    except ImportError as error:  # pragma: no cover - environment dependent
+        raise ProfileError(
+            "FlashGBX is required for cartridge detection: %s" % error)
+
+    def read(address, length=0):
+        if length == 0:
+            length = 2
+        return bytearray(_read_bytes(link, address, length))
+
+    def write(address, value, flashcart=False, sram=False):
+        if sram:
+            raise ProfileError("device detection does not use save space")
+        link.write_seq([(address, value)])
+
+    def write_fast(commands, flashcart=False):
+        pairs = []
+        for row in commands:
+            if not isinstance(row[0], int) or not isinstance(row[1], int):
+                raise ProfileError(
+                    "device detection cannot relocate %r" % (row,))
+            pairs.append((row[0], row[1]))
+        if pairs:
+            link.write_seq(pairs)
+
+    def power_cycle():
+        raise ProfileError("profile needs a cartridge power cycle")
+
+    return Flashcart(config=profile.spec, fncptr={
+        "cart_write_fncptr": write,
+        "cart_write_fast_fncptr": write_fast,
+        "cart_read_fncptr": read,
+        "cart_powercycle_fncptr": power_cycle,
+        "progress_fncptr": lambda _args: None,
+        "set_we_pin_wr": lambda: None,
+        "set_we_pin_audio": lambda: None,
+    })
+
+
+def _cfi_matches(profile, cfi):
+    if cfi is None:
+        return True
+    if profile.flash_size and cfi.get("size") \
+            and profile.flash_size != cfi["size"]:
+        return False
+    if (profile.spec.get("sector_size_from_cfi") is True
+            and cfi.get("regions")):
+        regions = profile.cfi_regions(cfi)
+        if regions and regions != cfi_sector_regions(cfi):
+            return False
+    return True
+
+
+def detect(link, profiles, verbose=False):
+    """Match the cartridge against the loaded profiles with FlashGBX."""
+    candidates = []
+    for profile in profiles:
+        if not profile.is_autodetectable():
+            continue
+        flashcart = _flashcart(profile, link, verbose=verbose)
+        try:
+            verified, flash_id = flashcart.VerifyFlashID()
+        except Exception as error:
+            # A profile whose command sequence this payload cannot run should
+            # not abort detection of the others.
+            if verbose:
+                print("%s: %s" % (profile.primary_name, error))
+            continue
+        if verbose:
+            print("probe %s: %s" % (profile.primary_name,
+                                    bytes(flash_id).hex(" ")))
+        if verified:
+            candidates.append((profile, bytes(flash_id), flashcart))
+
+    if not candidates:
+        return Detection()
+
+    cfi = None
+    for _profile, _flash_id, flashcart in candidates:
+        try:
+            raw = flashcart.ReadCFI()
+        except Exception:
+            continue
+        if raw:
+            cfi = normalize_cfi(raw)
+            break
+
+    matching = [entry for entry in candidates if _cfi_matches(entry[0], cfi)]
+    if not matching:
+        matching = candidates
+    profile, flash_id, _ = matching[0]
+    ambiguous = len({entry[0].path for entry in matching}) > 1
+    # Keep the full identification response for the `id` command; FlashGBX's
+    # VerifyFlashID only returns the bytes selected by flash_id_offsets.
+    id_buffer = None
+    try:
+        id_buffer = cart_id(link, profile)
+    except ProtocolError:
+        pass
+    return Detection(profile=profile, flash_id=flash_id, cfi=cfi,
+                     candidates=[entry[0] for entry in matching],
+                     ambiguous=ambiguous, id_buffer=id_buffer or flash_id)
+
+
+def resolve_profile(link, args, profiles=None):
+    """Return the profile selected by ``--profile`` or by autodetection."""
+    if profiles is None:
+        profiles = load_profiles(args.config)
+    if args.profile:
+        profile = find_profile(profiles, args.profile)
+        if profile is None:
+            raise SystemExit(
+                "unknown profile %r; run `flash.py profiles` to list names"
+                % args.profile)
+        if not profile.supports_write() and args.command in ("image", "erase",
+                                                              "program"):
+            raise SystemExit(
+                "profile %r cannot write this cartridge (command set %s)"
+                % (profile.primary_name, profile.command_set or "unknown"))
+        print("profile: %s" % profile.primary_name)
+        cfi = None
+        if args.command == "image":
+            try:
+                cfi = read_cfi(link, profile)
+            except ProtocolError as error:
+                print("CFI: not readable (%s)" % error)
+        return profile, cfi
+
+    result = detect(link, profiles, verbose=args.verbose)
+    if result.profile is None:
+        raise SystemExit(
+            "cartridge not found in the loaded profiles; pass --profile NAME "
+            "(run `flash.py profiles`)")
+    if result.ambiguous and args.verbose:
+        names = ", ".join(profile.primary_name for profile in result.candidates)
+        print("warning: several profiles matched, using %s (%s)"
+              % (result.profile.primary_name, names))
+    if (args.command in ("image", "erase", "program")
+            and not result.profile.supports_write()):
+        raise SystemExit(
+            "profile %r cannot write this cartridge (command set %s)"
+            % (result.profile.primary_name,
+               result.profile.command_set or "unknown"))
+    print("profile: %s" % result.profile.primary_name)
+    return result.profile, result.cfi
+
+
+
+SAVE_BASE = 0x0E000000
+SAVE_SIZE = 0x10000  # 64 KiB SRAM, the save media on this cartridge
+
+
+def save_dump(link, output, size=SAVE_SIZE):
+    """Read the cartridge save media and write it to a raw .sav file."""
+    if size <= 0:
+        raise ValueError("save size must be a positive byte count")
+    data = bytearray()
+    for offset in range(0, size, BLOCK_BYTES):
+        data += link.read8(SAVE_BASE + offset,
+                           min(BLOCK_BYTES, size - offset))
+    data = bytes(data)
+    Path(output).write_bytes(data)
+    return data
+
+
+def save_restore(link, path, size=SAVE_SIZE, verify=True, show_progress=True):
+    """Write a raw .sav file back to the cartridge save media."""
+    data = Path(path).read_bytes()
+    if not data:
+        raise ProtocolError("save file is empty")
+    if len(data) > size:
+        raise ProtocolError(
+            "save file is %d bytes but the cartridge save is %d bytes"
+            % (len(data), size))
+    written = 0
+    for offset in range(0, len(data), BLOCK_BYTES):
+        block = data[offset:offset + BLOCK_BYTES]
+        link.write8(SAVE_BASE + offset, block)
+        written += len(block)
+        if show_progress:
+            progress(link, written * 100 // len(data))
+            print("\rwrote %d of %d bytes" % (written, len(data)),
+                  end="", flush=True)
+    if show_progress:
+        print()
+    if not verify:
+        return data
+    back = bytearray()
+    for offset in range(0, len(data), BLOCK_BYTES):
+        back += link.read8(SAVE_BASE + offset,
+                           min(BLOCK_BYTES, len(data) - offset))
+    back = bytes(back)
+    if back != data:
+        offset = next(position for position in range(len(data))
+                      if back[position] != data[position])
+        raise ProtocolError(
+            "save verify failed at 0x%X (expected %02X, got %02X)"
+            % (offset, data[offset], back[offset]))
+    return data
+
+
+def encode_write_plan(profile, buffer_size=None):
+    """Encode a profile's write template for the payload."""
+    return plan_encode_write_plan(
+        profile.commands, buffer_size,
+        command_set=profile.command_set, name=profile.primary_name)
+
+
+def prepare_write(link, profile, cfi=None):
+    """Install a profile's write plan and return the payload block size."""
+    buffer_size = profile.buffer_size(cfi)
+    return plan_prepare_write(
+        link, profile.commands, buffer_size,
+        command_set=profile.command_set, name=profile.primary_name)
+
+
+def _sector_hashes(image, sectors):
+    return [hashlib.sha256(image[offset:offset + size]).hexdigest()
+            for offset, size in sectors]
+
+
+def _load_state(path, sectors):
     try:
         state = json.loads(Path(path).read_text())
     except Exception:
         return None
-    if state.get("sector_bytes") != SECTOR_BYTES:
+    if state.get("version") != 2:
+        return None
+    if state.get("sector_map") != [[offset, size]
+                                   for offset, size in sectors]:
         return None
     return state
 
@@ -311,11 +513,12 @@ def _fingerprint(image):
     return hashlib.sha256(image[:FINGERPRINT_BYTES]).hexdigest()
 
 
-def _save_state(path, image, hashes):
+def _save_state(path, image, sectors, hashes):
     Path(path).write_text(json.dumps({
+        "version": 2,
         "image_sha256": hashlib.sha256(image).hexdigest(),
         "fingerprint": _fingerprint(image),
-        "sector_bytes": SECTOR_BYTES,
+        "sector_map": [[offset, size] for offset, size in sectors],
         "size": len(image),
         "sectors": hashes,
     }, indent=1))
@@ -333,13 +536,12 @@ def _verify_sector(link, start, chunk, attempts=3):
     return back
 
 
-def _program_sector(link, start, chunk):
-    if start and start % RESET_EVERY == 0:
-        cart_reset(link, start)
-    sector_erase(link, start)
+def _program_sector(link, profile, start, chunk, block_bytes):
+    cart_reset(link, profile, address=start)
+    sector_erase(link, start, profile)
     written = 0
-    for offset in range(0, len(chunk), BLOCK_BYTES):
-        block = chunk[offset:offset + BLOCK_BYTES]
+    for offset in range(0, len(chunk), block_bytes):
+        block = chunk[offset:offset + block_bytes]
         if block == b"\xff" * len(block):
             continue
         write_block(link, start + offset, block)
@@ -347,19 +549,57 @@ def _program_sector(link, start, chunk):
     return written
 
 
-def write_image(link, path, full=False, verify=True, boot=False,
-                state_path=STATE_PATH):
+def write_image(link, path, profile, cfi=None, full=False, verify=True,
+                boot=False, state_path=STATE_PATH):
     image = Path(path).read_bytes()
     if not image:
         raise ProtocolError("image is empty")
-    if len(image) > 0x2000000:
-        raise ProtocolError("image is larger than the 32 MiB cartridge")
-    image += b"\xff" * (-len(image) % SECTOR_BYTES)
-    hashes = _sector_hashes(image)
+    if profile is None:
+        raise ProfileError("writing an image needs a flashcart profile")
+    if profile.spec.get("flash_bank_select_type"):
+        raise ProfileError(
+            "profile %r needs flash bank switching, which this tool cannot do"
+            % profile.primary_name)
+    if profile.command_set in ("3DMEMORY", "GBAMP", "SINTAX_YJENCRYPTED",
+                               "VASTFAME"):
+        raise ProfileError(
+            "profile %r uses the %s command set, which cannot be written"
+            % (profile.primary_name, profile.command_set))
+
+    total = profile.total_size(cfi)
+    if total and len(image) > total:
+        raise ProtocolError(
+            "image is %d bytes but the profile's flash is %d bytes"
+            % (len(image), total))
+    if total and total > 0x2000000:
+        raise ProfileError(
+            "flash is %d bytes, beyond the GBA's 32 MiB cartridge window"
+            % total)
+    padded = profile.pad_to_sector(len(image), cfi)
+    if total and padded > total:
+        raise ProtocolError(
+            "image padded to %d bytes exceeds the profile's %d-byte flash"
+            % (padded, total))
+    if padded > len(image):
+        image += b"\xff" * (padded - len(image))
+    sectors = profile.sector_map(len(image), cfi)
+    if not sectors:
+        raise ProfileError(
+            "profile %r has no sector map and no usable CFI data"
+            % profile.primary_name)
+    sectors = [(offset, size) for offset, size in sectors
+               if offset < len(image)]
+    if not sectors or sectors[-1][0] + sectors[-1][1] < len(image):
+        raise ProfileError("sector map does not cover the whole image")
+    block_bytes, chunk_bytes = prepare_write(link, profile, cfi)
+
+    hashes = _sector_hashes(image, sectors)
     print("image: %s (%d bytes, sha256 %s)"
           % (path, len(image), hashlib.sha256(image).hexdigest()))
+    print("sectors: %d, write window: %d bytes"
+          % (len(sectors), chunk_bytes))
 
-    state = None if full else _load_state(state_path)
+    state = None if full else _load_state(state_path, sectors)
     if state is not None and (state.get("size") != len(image)
                               or len(state.get("sectors", [])) != len(hashes)):
         state = None
@@ -380,97 +620,128 @@ def write_image(link, path, full=False, verify=True, boot=False,
         print("state: %d of %d sectors changed" % (len(dirty), len(hashes)))
     else:
         print("reading %d bytes from the cartridge ..." % len(image))
-        current = read_region(link, 0, len(image))
-        dirty = [index for index in range(len(hashes))
-                 if current[index * SECTOR_BYTES:(index + 1) * SECTOR_BYTES]
-                 != image[index * SECTOR_BYTES:(index + 1) * SECTOR_BYTES]]
-        print("diff: %d of %d sectors changed" % (len(dirty), len(hashes)))
+        current = bytearray()
+        for index, (offset, size) in enumerate(sectors):
+            current += read_region(link, offset, size)
+            progress(link, (index + 1) * 100 // len(sectors))
+        current = bytes(current)
+        dirty = [index for index, (offset, size) in enumerate(sectors)
+                 if current[offset:offset + size]
+                 != image[offset:offset + size]]
+        print("diff: %d of %d sectors changed" % (len(dirty), len(sectors)))
 
     if not dirty:
         print("cartridge already matches the image")
+        progress(link, 100)
         if boot:
             link.boot()
         return
 
     # A partial flash must not leave a state file that claims a match.
     Path(state_path).unlink(missing_ok=True)
+    progress(link, 0)
 
     for number, index in enumerate(dirty, 1):
-        start = index * SECTOR_BYTES
-        chunk = image[start:start + SECTOR_BYTES]
-        print("[%d/%d] sector 0x%X ..."
-              % (number, len(dirty), start), end="", flush=True)
+        offset, size = sectors[index]
+        chunk = image[offset:offset + size]
+        print("[%d/%d] sector 0x%X (0x%X bytes) ..."
+              % (number, len(dirty), offset, size), end="", flush=True)
         back = None
         for attempt in range(2):
-            written = _program_sector(link, start, chunk)
+            written = _program_sector(link, profile, offset, chunk,
+                                      block_bytes)
             print(" wrote %d bytes" % written, end="", flush=True)
             if not verify:
                 break
-            back = _verify_sector(link, start, chunk)
+            back = _verify_sector(link, offset, chunk)
             if back is None:
                 print(", verified", end="")
                 break
             print(" mismatch, rewriting ...", end="", flush=True)
         if verify and back is not None:
-            offset = next(position for position in range(len(chunk))
-                          if back[position] != chunk[position])
+            position = next(position for position in range(len(chunk))
+                            if back[position] != chunk[position])
             raise ProtocolError(
                 "verify failed in sector 0x%X at 0x%X (expected %s, got %s)"
-                % (start, offset,
-                   chunk[offset:offset + 8].hex(" "),
-                   back[offset:offset + 8].hex(" ")))
+                % (offset, position,
+                   chunk[position:position + 8].hex(" "),
+                   back[position:position + 8].hex(" ")))
+        progress(link, number * 100 // len(dirty))
         print()
 
-    _save_state(state_path, image, hashes)
+    _save_state(state_path, image, sectors, hashes)
+    progress(link, 100)
     print("done")
     if boot:
         link.boot()
 
 
 
-def swap_bits(value, pair):
-    low, high = pair
-    if ((value >> low) & 1) ^ ((value >> high) & 1):
-        value ^= (1 << low) | (1 << high)
-    return value
-
-
-def parse_cfi(buffer):
-    swaps = {
-        b"QRY": [],
-        b"RQZ": [(0, 1)],
-        b"\x92\x91\x9a": [(0, 1), (6, 7)],
-    }
-    magic = buffer[0x20:0x21] + buffer[0x22:0x23] + buffer[0x24:0x25]
-    if magic not in swaps:
-        raise ProtocolError("no CFI signature at 0x20/0x22/0x24 (%r)" % magic)
-    pins = swaps[magic]
-    data = bytearray(buffer)
-    for pair in pins:
-        for index in range(len(data)):
-            data[index] = swap_bits(data[index], pair)
-
-    size = 1 << data[0x4E]
-    vdd_min = (data[0x36] >> 4) + (data[0x36] & 0x0F) / 10.0
-    vdd_max = (data[0x38] >> 4) + (data[0x38] & 0x0F) / 10.0
-    regions = []
-    position = 0
-    for index in range(min(4, data[0x58])):
-        count = (data[0x5C + index * 8] << 8 | data[0x5A + index * 8]) + 1
-        block = (data[0x60 + index * 8] << 8 | data[0x5E + index * 8]) * 256
-        regions.append((block, count))
-        position += block * count
-    return {
-        "pins": pins,
-        "size": size,
-        "vdd_min": vdd_min,
-        "vdd_max": vdd_max,
-        "regions": regions,
-        "data": data,
-    }
-
-
 # -- CLI ----------------------------------------------------------------------
+
+def print_cfi(info):
+    print("CFI signature: OK")
+    print("swapped pins: %s" % (info["pins"] or "none"))
+    print("size: 0x%X (%.2f MiB)"
+          % (info["size"], info["size"] / (1024 * 1024)))
+    print("voltage: %.1f-%.1f V" % (info["vdd_min"], info["vdd_max"]))
+    position = 0
+    for block, count in cfi_sector_regions(info):
+        end = position + block * count
+        print("region 0x%07X-0x%07X: 0x%X x %d"
+              % (position, end - 1, block, count))
+        position = end
+    if info.get("boot_sector_raw") == 0x03:
+        print("sector map: reversed (top boot)")
+    print("buffer write: %s"
+          % ("%d bytes" % info["buffer_size"]
+             if info.get("buffer_size") else "not reported"))
+
+
+def print_detection(result):
+    if result.profile is None:
+        print("no profile matched the cartridge")
+        if result.baseline is not None:
+            print("  before identification: %s" % result.baseline[:8].hex(" "))
+        if result.id_buffer is not None:
+            print("  after identification:  %s" % result.id_buffer[:8].hex(" "))
+        return 1
+    profile = result.profile
+    print("profile: %s" % profile.primary_name)
+    if profile.path:
+        print("file: %s" % profile.path.name)
+    if len(profile.names) > 1:
+        print("aliases: %d (run `flash.py profiles`)"
+              % (len(profile.names) - 1))
+    print("command set: %s" % (profile.command_set or "unknown"))
+    print("flash ID: %s" % result.flash_id.hex(" ").upper())
+    if result.ambiguous:
+        print("warning: %d profiles match this ID; using the first"
+              % len(result.candidates))
+    if result.cfi:
+        print_cfi(result.cfi)
+    else:
+        print("CFI: not readable with this profile")
+    return 0
+
+
+def profiles_command(args):
+    profiles = load_profiles(args.config)
+    for profile in profiles:
+        suffix = ""
+        if len(profile.names) > 1:
+            suffix = " (+%d aliases)" % (len(profile.names) - 1)
+        if not profile.supports_write():
+            suffix += " [read-only]"
+        print("%s%s" % (profile.primary_name, suffix))
+        if args.verbose:
+            for name in profile.names[1:]:
+                print("  alias: %s" % name)
+            if profile.path:
+                print("  file: %s" % profile.path)
+    print("%d profiles in %s" % (len(profiles), find_config_dir(args.config)))
+    return 0
+
 
 def upload(args):
     payload = Path(args.payload)
@@ -497,10 +768,25 @@ def doctor(args):
         problems += 1
 
     try:
+        profiles = load_profiles(args.config)
+        print("profiles: ok (%d in %s)"
+              % (len(profiles), find_config_dir(args.config)))
+    except ProfileError as error:
+        print("profiles: MISSING (%s)" % error)
+        problems += 1
+
+    try:
         import serial
         print("pyserial: ok (%s)" % serial.__version__)
     except ImportError:
         print("pyserial: MISSING; python3 -m pip install pyserial")
+        problems += 1
+
+    try:
+        import FlashGBX
+        print("FlashGBX: ok (%s)" % getattr(FlashGBX, "__version__", "installed"))
+    except ImportError:
+        print("FlashGBX: MISSING; python3 -m pip install FlashGBX")
         problems += 1
 
     gbasend = shutil.which(args.gbasend)
@@ -542,6 +828,10 @@ def main(argv=None):
                         help="path to the gbasend CLI")
     common.add_argument("--payload", default=argparse.SUPPRESS,
                         help="payload .gba to upload")
+    common.add_argument("--config", default=argparse.SUPPRESS,
+                        help="FlashGBX profile directory (default: autodetect)")
+    common.add_argument("--profile", default=argparse.SUPPRESS,
+                        help="flashcart profile name; skips autodetection")
     common.add_argument("--handshake-wait", type=int, default=argparse.SUPPRESS,
                         help="seconds gbasend waits for the GBA handshake")
     common.add_argument("--verbose", action="store_true",
@@ -555,7 +845,11 @@ def main(argv=None):
     sub.add_parser("upload", parents=[common],
                    help="upload the payload over multiboot")
     sub.add_parser("doctor", parents=[common],
-                   help="check the payload, pyserial, gbasend, and port")
+                   help="check the payload, profiles, gbasend, and port")
+    sub.add_parser("profiles", parents=[common],
+                   help="list the loaded flashcart profiles")
+    sub.add_parser("detect", parents=[common],
+                   help="identify the cartridge and select a profile")
     sub.add_parser("id", parents=[common],
                    help="read the cartridge flash ID")
     sub.add_parser("cfi", parents=[common],
@@ -569,10 +863,25 @@ def main(argv=None):
     read.add_argument("length", type=lambda value: int(value, 0))
     read.add_argument("output")
 
+    save = sub.add_parser("save", parents=[common],
+                          help="dump the cartridge save to a raw .sav file")
+    save.add_argument("output")
+    save.add_argument("--size", type=lambda value: int(value, 0),
+                      default=SAVE_SIZE,
+                      help="save media size in bytes (default 0x10000)")
+
+    restore = sub.add_parser("restore", parents=[common],
+                             help="write a raw .sav file to the cartridge save")
+    restore.add_argument("file")
+    restore.add_argument("--size", type=lambda value: int(value, 0),
+                         default=SAVE_SIZE,
+                         help="save media size in bytes (default 0x10000)")
+    restore.add_argument("--no-verify", action="store_true")
+
     erase = sub.add_parser("erase", parents=[common],
-                           help="erase one 128 KiB sector")
+                           help="erase one flash sector")
     erase.add_argument("address", type=lambda value: int(value, 0))
-    erase.add_argument("--timeout", type=float, default=12.0)
+    erase.add_argument("--timeout", type=float, default=30.0)
 
     program = sub.add_parser("program", parents=[common],
                              help="program one 16-bit word")
@@ -601,6 +910,8 @@ def main(argv=None):
         "upload_baud": 256_000,
         "gbasend": "gbasend",
         "payload": str(PAYLOAD),
+        "config": None,
+        "profile": None,
         "handshake_wait": 60,
         "verbose": False,
     }
@@ -611,40 +922,94 @@ def main(argv=None):
     if args.command == "doctor":
         return doctor(args)
 
+    if args.command == "profiles":
+        return profiles_command(args)
+
     if args.command == "upload":
         args.port = find_port(args.port)
         upload(args)
         return 0
 
+    profiles = load_profiles(args.config)
     args.port = find_port(args.port)
     link = open_link(args)
     try:
-        if args.command == "id":
-            print(cart_id(link).hex(" ").upper())
+        if args.command == "detect":
+            if args.profile:
+                profile = find_profile(profiles, args.profile)
+                if profile is None:
+                    raise SystemExit("unknown profile %r" % args.profile)
+                print("profile: %s" % profile.primary_name)
+                print("flash ID: %s"
+                      % cart_id(link, profile).hex(" ").upper())
+                try:
+                    print_cfi(read_cfi(link, profile))
+                except ProtocolError as error:
+                    print("CFI: not readable (%s)" % error)
+                return 0
+            return print_detection(detect(link, profiles,
+                                          verbose=args.verbose))
+        elif args.command == "id":
+            if args.profile:
+                profile = find_profile(profiles, args.profile)
+                if profile is None:
+                    raise SystemExit("unknown profile %r" % args.profile)
+                print(cart_id(link, profile).hex(" ").upper())
+                print("profile: %s" % profile.primary_name)
+            else:
+                result = detect(link, profiles, verbose=args.verbose)
+                if result.profile is not None:
+                    print(result.id_buffer[:8].hex(" ").upper())
+                    print("profile: %s" % result.profile.primary_name)
+                else:
+                    print(cart_id(link).hex(" ").upper())
+                    sys.stderr.write(
+                        "warning: no profile matched the flash ID\n")
         elif args.command == "cfi":
-            info = parse_cfi(cart_cfi(link))
-            print("CFI signature: OK")
-            print("swapped pins: %s" % (info["pins"] or "none"))
-            print("size: 0x%X (%.2f MiB)"
-                  % (info["size"], info["size"] / (1024 * 1024)))
-            print("voltage: %.1f-%.1f V" % (info["vdd_min"], info["vdd_max"]))
-            position = 0
-            for block, count in info["regions"]:
-                end = position + block * count
-                print("region 0x%07X-0x%07X: 0x%X x %d"
-                      % (position, end - 1, block, count))
-                position = end
+            profile = None
+            if args.profile:
+                profile = find_profile(profiles, args.profile)
+                if profile is None:
+                    raise SystemExit("unknown profile %r" % args.profile)
+            else:
+                result = detect(link, profiles, verbose=args.verbose)
+                profile = result.profile
+            if profile is not None:
+                info = read_cfi(link, profile)
+            else:
+                try:
+                    info = read_cfi(link)
+                except ProtocolError:
+                    cart_reset(link)
+                    link.write_seq([(0, 0x98)])
+                    time.sleep(0.05)
+                    info = parse_cfi(_read_bytes(link, 0, CFI_BYTES))
+                    cart_reset(link)
+            print_cfi(info)
         elif args.command == "read":
             count = (args.length + 3) // 4
             words = link.read_words(args.address, count)
             data = b"".join(struct.pack("<I", word) for word in words)
             Path(args.output).write_bytes(data[:args.length])
             print("wrote %d bytes to %s" % (args.length, args.output))
+        elif args.command == "save":
+            data = save_dump(link, args.output, args.size)
+            print("wrote %d bytes to %s (sha256 %s)"
+                  % (len(data), args.output, hashlib.sha256(data).hexdigest()))
+        elif args.command == "restore":
+            data = save_restore(link, args.file, args.size,
+                                verify=not args.no_verify)
+            print("%d bytes %s from %s"
+                  % (len(data),
+                     "written" if args.no_verify else "written and verified",
+                     args.file))
         elif args.command == "erase":
-            if sector_erase(link, args.address, args.timeout):
+            profile, _ = resolve_profile(link, args, profiles)
+            if sector_erase(link, args.address, profile, args.timeout):
                 print("sector 0x%X erased" % args.address)
         elif args.command == "program":
-            single_write(link, args.address, args.value)
+            profile, _ = resolve_profile(link, args, profiles)
+            single_write(link, args.address, args.value, profile)
             print("0x%04X programmed at 0x%X" % (args.value, args.address))
         elif args.command == "seq":
             pairs = []
@@ -654,9 +1019,10 @@ def main(argv=None):
             link.write_seq(pairs)
             print("wrote %d pairs" % len(pairs))
         elif args.command == "image":
-            write_image(link, args.file, full=args.full,
-                        verify=not args.no_verify, boot=args.boot,
-                        state_path=args.state)
+            profile, cfi = resolve_profile(link, args, profiles)
+            write_image(link, args.file, profile, cfi=cfi,
+                        full=args.full, verify=not args.no_verify,
+                        boot=args.boot, state_path=args.state)
         elif args.command == "boot":
             link.boot()
             print("soft reset requested")
