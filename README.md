@@ -122,7 +122,7 @@ copy files by hand.
    make -C payload
    ```
 
-   Output: `payload/flasher.gba` (about 3.2 KiB). Requires only
+   Output: `payload/flasher.gba` (about 5 KiB). Requires only
    `arm-none-eabi-gcc` and Python 3.
 
 5. **Install the FlashGBLink plugin.**
