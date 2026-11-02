@@ -251,7 +251,9 @@ and a save that was never dumped is gone.
 - **Pico firmware** (`gbasend-pico`) bridges USB serial to the GBA link port.
 - **Payload** (`payload/`) runs in GBA RAM after multiboot, performs 16-bit
   cartridge stores/loads, byte-wide save access, the progress bars and a soft
-  reset, and holds the profile's write template.
+  reset, and holds the profile's write template. Before booting the cartridge it
+  resets the I/O registers left over from multiboot (keypad IRQ, SIO, timers,
+  DMA) so the game starts as it would after a hard reset.
 - **FlashGBLink plugin** (`flashgblink/`) implements the AGB-relevant subset of
   FlashGBX's device protocol on top of `flashgblink/gbalink/`, so FlashGBX's `LK_Device`,
   `Flashcart` and profile database run unchanged.
@@ -328,7 +330,11 @@ AMD buffered writes finish with `0x2A` followed by data polling at the buffer
 address.
 
 The BIOS soft reset only boots the cartridge when the flag at `0x03007FFA` is
-zero; multiboot leaves it non-zero.
+zero; multiboot leaves it non-zero. SWI 00h resets the CPU but not the I/O
+registers, so the payload first calls SWI 01h (`RegisterRamReset`, flags
+`0xFC`) to clear the keypad, SIO, timer and DMA state left by multiboot. Without
+that cleanup, a game can boot after a soft reset but ignore button input until
+a hard reset.
 
 ## Development
 

@@ -355,10 +355,25 @@ static void cmd_write8(void)
 
 static void cmd_boot(void)
 {
-	/* A zero soft-reset flag makes the BIOS boot the cartridge after the
-	 * reset; a non-zero value jumps to 0x02000000 instead. */
-	*(volatile u8 *)0x03007FFA = 0;
-	__asm__ volatile("swi #0x000000" ::: "memory");
+	/* SWI 00h only resets the CPU state; it leaves I/O registers alone.
+	 * Reset palette, VRAM, OAM, SIO, sound and the remaining registers,
+	 * but not WRAM, so this code stays alive until the final SWI 00h.
+	 * Without this, the BIOS multiboot keypad/SIO state survives into the
+	 * cartridge and can leave the game unresponsive to buttons.
+	 *
+	 * Set the soft-reset flag in the same asm block: a SWI may clobber
+	 * r0-r3, and a compiler-generated zero store after the first SWI can
+	 * otherwise leave the flag non-zero and restart this payload. */
+	__asm__ volatile(
+		"mov r0, #0xFC\n"
+		"swi #0x010000\n"
+		"mov r0, #0\n"
+		"mov r1, #0x03000000\n"
+		"add r1, r1, #0x7F00\n"
+		"add r1, r1, #0xFA\n"
+		"strb r0, [r1]\n"
+		"swi #0x000000\n"
+		::: "r0", "r1", "memory");
 	for (;;)
 		;
 }
