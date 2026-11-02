@@ -40,6 +40,7 @@ typedef unsigned int u32;
 #define OP_READ8 0x70u
 #define OP_WRITE8 0x80u
 #define OP_SET_PLAN 0x90u
+#define OP_DONE 0xA0u
 
 #define BLOCK_WORDS 1024u /* packed 32-bit words, 4 KiB of cartridge data */
 #define PLAN_MAX_COMMANDS 12u
@@ -372,15 +373,24 @@ static void cmd_boot(void)
 
 #define COL_BG 0x0000u
 #define COL_TRACK 0x18C6u
+#define COL_DIM 0x39E7u
 #define COL_WRITE 0x03E0u
 #define COL_VERIFY 0x7FE0u
+#define COL_TEXT 0x7FFFu
 
 #define BAR_X 20u
 #define BAR_W 200u
-#define BAR_H 22u
+#define BAR_H 18u
 #define BAR_PAD 2u
-#define BAR_WRITE_Y 48u
-#define BAR_VERIFY_Y 90u
+#define BAR_WRITE_Y 54u
+#define BAR_VERIFY_Y 97u
+#define LABEL_WRITE_Y 43u
+#define LABEL_VERIFY_Y 86u
+#define LABEL_H 10u
+
+static u32 write_percent = 0;
+static u32 verify_percent = 0;
+static u32 verify_started = 0;
 
 static void fill(u32 x, u32 y, u32 w, u32 h, u16 colour)
 {
@@ -391,32 +401,193 @@ static void fill(u32 x, u32 y, u32 w, u32 h, u16 colour)
 			VRAM[(y + row) * SCREEN_W + x + col] = colour;
 }
 
-static void bar_init(u32 y, u16 colour)
+/* A small 5x7 font: space, %, -, digits, A-Z. */
+static const char font_chars[] = " %-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+static const u8 font_glyphs[][5] = {
+	{ 0x00, 0x00, 0x00, 0x00, 0x00 }, /* space */
+	{ 0x23, 0x13, 0x08, 0x64, 0x62 }, /* % */
+	{ 0x08, 0x08, 0x08, 0x08, 0x08 }, /* - */
+	{ 0x3E, 0x51, 0x49, 0x45, 0x3E }, /* 0 */
+	{ 0x00, 0x42, 0x7F, 0x40, 0x00 }, /* 1 */
+	{ 0x42, 0x61, 0x51, 0x49, 0x46 }, /* 2 */
+	{ 0x21, 0x41, 0x45, 0x4B, 0x31 }, /* 3 */
+	{ 0x18, 0x14, 0x12, 0x7F, 0x10 }, /* 4 */
+	{ 0x27, 0x45, 0x45, 0x45, 0x39 }, /* 5 */
+	{ 0x3C, 0x4A, 0x49, 0x49, 0x30 }, /* 6 */
+	{ 0x01, 0x71, 0x09, 0x05, 0x03 }, /* 7 */
+	{ 0x36, 0x49, 0x49, 0x49, 0x36 }, /* 8 */
+	{ 0x06, 0x49, 0x49, 0x29, 0x1E }, /* 9 */
+	{ 0x7E, 0x11, 0x11, 0x11, 0x7E }, /* A */
+	{ 0x7F, 0x49, 0x49, 0x49, 0x36 }, /* B */
+	{ 0x3E, 0x41, 0x41, 0x41, 0x22 }, /* C */
+	{ 0x7F, 0x41, 0x41, 0x22, 0x1C }, /* D */
+	{ 0x7F, 0x49, 0x49, 0x49, 0x41 }, /* E */
+	{ 0x7F, 0x09, 0x09, 0x09, 0x01 }, /* F */
+	{ 0x3E, 0x41, 0x49, 0x49, 0x7A }, /* G */
+	{ 0x7F, 0x08, 0x08, 0x08, 0x7F }, /* H */
+	{ 0x00, 0x41, 0x7F, 0x41, 0x00 }, /* I */
+	{ 0x20, 0x40, 0x41, 0x3F, 0x01 }, /* J */
+	{ 0x7F, 0x08, 0x14, 0x22, 0x41 }, /* K */
+	{ 0x7F, 0x40, 0x40, 0x40, 0x40 }, /* L */
+	{ 0x7F, 0x02, 0x0C, 0x02, 0x7F }, /* M */
+	{ 0x7F, 0x04, 0x08, 0x10, 0x7F }, /* N */
+	{ 0x3E, 0x41, 0x41, 0x41, 0x3E }, /* O */
+	{ 0x7F, 0x09, 0x09, 0x09, 0x06 }, /* P */
+	{ 0x3E, 0x41, 0x51, 0x21, 0x5E }, /* Q */
+	{ 0x7F, 0x09, 0x19, 0x29, 0x46 }, /* R */
+	{ 0x46, 0x49, 0x49, 0x49, 0x31 }, /* S */
+	{ 0x01, 0x01, 0x7F, 0x01, 0x01 }, /* T */
+	{ 0x3F, 0x40, 0x40, 0x40, 0x3F }, /* U */
+	{ 0x1F, 0x20, 0x40, 0x20, 0x1F }, /* V */
+	{ 0x3F, 0x40, 0x38, 0x40, 0x3F }, /* W */
+	{ 0x63, 0x14, 0x08, 0x14, 0x63 }, /* X */
+	{ 0x07, 0x08, 0x70, 0x08, 0x07 }, /* Y */
+	{ 0x61, 0x51, 0x49, 0x45, 0x43 }  /* Z */
+};
+
+static u32 font_index(char c)
 {
-	fill(BAR_X, y, BAR_W, BAR_H, colour);
+	u32 i;
+
+	for (i = 0; font_chars[i] != '\0'; i++)
+		if (font_chars[i] == c)
+			return i;
+	return 0;
+}
+
+static u32 text_width(const char *text, u32 scale)
+{
+	u32 length = 0;
+
+	while (text[length] != '\0')
+		length++;
+	return length * 6u * scale;
+}
+
+static void draw_char(u32 x, u32 y, char c, u32 scale, u16 colour)
+{
+	const u8 *glyph = font_glyphs[font_index(c)];
+	u32 col, row;
+
+	for (col = 0; col < 5u; col++)
+		for (row = 0; row < 7u; row++)
+			if ((glyph[col] >> row) & 1u)
+				fill(x + col * scale, y + row * scale,
+				     scale, scale, colour);
+}
+
+static void draw_text(u32 x, u32 y, const char *text, u32 scale, u16 colour)
+{
+	u32 i;
+
+	for (i = 0; text[i] != '\0'; i++)
+		draw_char(x + i * 6u * scale, y, text[i], scale, colour);
+}
+
+static void draw_text_centered(u32 y, const char *text, u32 scale, u16 colour)
+{
+	u32 width = text_width(text, scale);
+
+	draw_text((SCREEN_W - width) / 2u, y, text, scale, colour);
+}
+
+static void draw_row(u32 y, const char *name, u32 percent, u16 colour,
+		     u32 active)
+{
+	char pct[5];
+	u32 n = 0;
+	u32 i;
+
+	if (active) {
+		if (percent >= 100u) {
+			pct[n++] = '1';
+			pct[n++] = '0';
+			pct[n++] = '0';
+		} else {
+			if (percent >= 10u)
+				pct[n++] = (char)('0' + percent / 10u);
+			pct[n++] = (char)('0' + percent % 10u);
+		}
+		pct[n++] = '%';
+	} else {
+		pct[n++] = '-';
+		pct[n++] = '-';
+	}
+	pct[n] = '\0';
+
+	fill(BAR_X, y, BAR_W, LABEL_H, COL_BG);
+	/* Phase name is deliberately smaller than the percentage. */
+	draw_text(BAR_X, y, name, 1u, active ? colour : COL_DIM);
+	draw_text(BAR_X + BAR_W - text_width(pct, 1u), y, pct, 1u,
+		  active ? colour : COL_DIM);
+	(void)i;
+}
+
+static void draw_bar(u32 y, u16 colour, u32 percent, u32 active)
+{
+	u16 frame = active ? colour : COL_DIM;
+
+	fill(BAR_X, y, BAR_W, BAR_H, COL_BG);
+	fill(BAR_X, y, BAR_W, BAR_H, frame);
 	fill(BAR_X + 1u, y + 1u, BAR_W - 2u, BAR_H - 2u, COL_TRACK);
+	if (active && percent > 0u) {
+		fill(BAR_X + 2u, y + 2u,
+		     (BAR_W - 4u) * percent / 100u, BAR_H - 4u, colour);
+	}
 }
 
 static void screen_init(void)
 {
 	REG_DISPCNT = 0x0403u; /* mode 3, BG2 enabled */
 	fill(0, 0, SCREEN_W, SCREEN_H, COL_BG);
-	bar_init(BAR_WRITE_Y, COL_WRITE);
-	bar_init(BAR_VERIFY_Y, COL_VERIFY);
+	draw_text_centered(26u, "FLASHGBLINK", 1u, COL_TEXT);
+	draw_row(LABEL_WRITE_Y, "WRITE", 0u, COL_WRITE, 0u);
+	draw_bar(BAR_WRITE_Y, COL_WRITE, 0u, 0u);
+	draw_row(LABEL_VERIFY_Y, "VERIFY", 0u, COL_VERIFY, 0u);
+	draw_bar(BAR_VERIFY_Y, COL_VERIFY, 0u, 0u);
+	draw_text_centered(127u, "READY", 1u, COL_TEXT);
 }
 
 static void show_progress(u32 phase, u32 percent)
 {
-	u32 y = phase ? BAR_VERIFY_Y : BAR_WRITE_Y;
-	u16 colour = phase ? COL_VERIFY : COL_WRITE;
-	u32 width = BAR_W - 2u * BAR_PAD;
-
 	if (percent > 100u)
 		percent = 100u;
-	fill(BAR_X + BAR_PAD, y + BAR_PAD, width, BAR_H - 2u * BAR_PAD,
-	     COL_TRACK);
-	fill(BAR_X + BAR_PAD, y + BAR_PAD, width * percent / 100u,
-	     BAR_H - 2u * BAR_PAD, colour);
+	if (phase == 0u) {
+		write_percent = percent;
+		draw_row(LABEL_WRITE_Y,
+			 percent >= 100u ? "WRITE DONE" : "WRITING",
+			 percent, COL_WRITE, 1u);
+		draw_bar(BAR_WRITE_Y, COL_WRITE, percent, 1u);
+	} else {
+		verify_started = 1u;
+		verify_percent = percent;
+		draw_row(LABEL_WRITE_Y, "WRITE DONE", write_percent,
+			 COL_WRITE, 1u);
+		draw_bar(BAR_WRITE_Y, COL_WRITE, write_percent, 1u);
+		draw_row(LABEL_VERIFY_Y, "VERIFYING", percent, COL_VERIFY, 1u);
+		draw_bar(BAR_VERIFY_Y, COL_VERIFY, percent, 1u);
+	}
+	fill(0, 120u, SCREEN_W, 40u, COL_BG);
+	draw_text_centered(127u, "DO NOT POWER OFF", 1u, COL_TEXT);
+}
+
+static void draw_check(u32 x, u32 y, u16 colour)
+{
+	static const u8 cx[] = { 0, 3, 6, 9, 12, 15, 18 };
+	static const u8 cy[] = { 6, 9, 12, 9, 6, 3, 0 };
+	u32 i;
+
+	for (i = 0; i < 7u; i++)
+		fill(x + cx[i], y + cy[i], 3u, 3u, colour);
+}
+
+static void show_done(void)
+{
+	fill(0, 0, SCREEN_W, SCREEN_H, COL_BG);
+	draw_text_centered(41u, "FLASHGBLINK", 1u, COL_TEXT);
+	draw_text_centered(60u, "FLASH COMPLETE", 2u, COL_WRITE);
+	draw_check(109u, 84u, COL_WRITE);
+	draw_text_centered(112u, "RESTART GBA TO PLAY", 1u, COL_TEXT);
 }
 
 static void dispatch(u32 hdr)
@@ -448,6 +619,10 @@ static void dispatch(u32 hdr)
 		break;
 	case OP_PROGRESS:
 		show_progress((hdr >> 16) & 0xFFu, hdr & 0xFFu);
+		reply = ST_OK;
+		break;
+	case OP_DONE:
+		show_done();
 		reply = ST_OK;
 		break;
 	case OP_READ8:

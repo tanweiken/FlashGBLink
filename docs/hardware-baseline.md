@@ -138,7 +138,7 @@ buffered-write loop, so its size and hash changed:
 
 | Item | Now |
 |---|---|
-| Payload | `payload/flasher.gba`, 3312 bytes, sha256 `7f5ffe507a0b33b551f3fd2b16f32762395ae6aba24cd6d65418a8bbd4c6fe4c` |
+| Payload | `payload/flasher.gba`, 5120 bytes, sha256 `47e517eabc0f3d6a890e0877529af8016cce253f217cb27b25f96fbce45139ff` |
 | New opcodes | `0x5A9000` install write template; `0x5A0060nn` / `0x5A0160nn` write/verify progress bars |
 | Host | `flash.py` autodetects the profile, then installs its buffer/single-write template |
 
@@ -164,7 +164,7 @@ Recorded 2026-11-01 on the same setup, after switching the host to FlashGBX
 | SRAM read through the adapter | first 4 KiB matches the `flash.py save` dump |
 | Full write through the adapter | 407.8 s first run, 403.9 s second run, both verified |
 | Independent read-back after write | header, first/last 64 KiB, then all 4 MiB match |
-| GBA progress bars | green write bar and cyan verify bar advance in 2% steps |
+| GBA progress UI | title, WRITE/VERIFY labels, percentages, green/cyan bars, FLASH COMPLETE / RESTART GBA TO PLAY |
 
 The adapter's write path erases every sector in the image (FlashGBX behaviour);
 the `.flash-state.json` delta fast path remains a `flash.py image` feature.  The

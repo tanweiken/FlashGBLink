@@ -27,6 +27,7 @@ OP_PROGRESS = 0x60
 OP_READ8 = 0x70
 OP_WRITE8 = 0x80
 OP_SET_PLAN = 0x90
+OP_DONE = 0xA0
 
 ST_OK = 0xA5A50000
 ST_BAD = 0xA5A500E1
@@ -332,6 +333,22 @@ def progress(link, percent, phase=0, timeout=2.0):
         if (status & 0xFFFFFF00) == ST_OK:
             return
     raise ProtocolError("progress update %d%% was not acknowledged" % percent)
+
+
+def done(link, timeout=2.0):
+    """Show the completion message on the GBA."""
+    header = (HDR_MAGIC << 24) | (OP_DONE << 8)
+    link.xfer_with_recovery([header, PING])
+    time.sleep(0.01)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            status = link.ping(timeout=0.5)
+        except ProtocolError:
+            continue
+        if (status & 0xFFFFFF00) == ST_OK:
+            return
+    raise ProtocolError("completion message was not acknowledged")
 
 
 def write_block(link, address, data, timeout=30.0):

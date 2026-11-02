@@ -20,8 +20,8 @@ from FlashGBX.LK_Device import LK_Device
 from FlashGBX.Logging import dprint
 
 from .log import log
-from .gbalink import (BLOCK_BYTES, Link, ProtocolError, ST_OK, encode_write_plan,
-                      progress, read_region, write_block)
+from .gbalink import (BLOCK_BYTES, Link, ProtocolError, ST_OK, done,
+                      encode_write_plan, progress, read_region, write_block)
 
 SAVE_BASE = 0x0E000000
 
@@ -541,6 +541,13 @@ class GbxDevice(LK_Device):
         if not self._write_active or self.LINK is None:
             return result
         action = args.get("action")
+        if action == "FINISHED":
+            self._update_progress(self._write_total)
+            try:
+                done(self.LINK)
+            except Exception:
+                pass
+            return result
         if action == "READ":
             # FlashGBX verifies the image with a second read pass; switch to
             # the cyan bar and leave the green one full.
@@ -549,8 +556,6 @@ class GbxDevice(LK_Device):
                 self._verify_phase = True
                 self._last_percent[1] = -1
                 self._update_progress(0)
-        elif action == "FINISHED":
-            self._update_progress(self._write_total)
         elif action in ("UPDATE_POS", "SECTOR_ERASE", "WRITE"):
             pos = args.get("pos")
             if pos is None:

@@ -32,12 +32,12 @@ from flashgbx import (ProfileError, ProtocolError, cfi_sector_regions,
                       find_config_dir, find_profile, load_profiles,
                       normalize_cfi, parse_cfi, relocate_commands, swap_bits)
 from flashgblink.gbalink import (ADDR_ABS, ADDR_PA, ADDR_SA, BLOCK_BYTES, HDR_MAGIC,
-                     OP_BOOT, OP_PROGRESS, OP_READ, OP_READ8, OP_SET_PLAN,
+                     OP_BOOT, OP_DONE, OP_PROGRESS, OP_READ, OP_READ8, OP_SET_PLAN,
                      OP_WRITE8, OP_WRITE_BLOCK, OP_WRITE_SEQ, PAYLOAD, PING,
                      PLAN_MAX_COMMANDS, RESYNC_WORDS, ST_BAD, ST_OK,
                      VAL_BS, VAL_CONST, VAL_PD, WAIT_ABS, WAIT_NONE, WAIT_PD,
                      WAIT_SA, Link, PlanError, TransferError, _check_status,
-                     _hex, _pack_words, find_port, progress, read_region,
+                     _hex, _pack_words, done, find_port, progress, read_region,
                      single_write_waits, write_block)
 from flashgblink.gbalink.plan import encode_write_plan as plan_encode_write_plan
 from flashgblink.gbalink.plan import prepare_write as plan_prepare_write
@@ -633,6 +633,7 @@ def write_image(link, path, profile, cfi=None, full=False, verify=True,
     if not dirty:
         print("cartridge already matches the image")
         progress(link, 100)
+        done(link)
         if boot:
             link.boot()
         return
@@ -671,6 +672,7 @@ def write_image(link, path, profile, cfi=None, full=False, verify=True,
 
     _save_state(state_path, image, sectors, hashes)
     progress(link, 100)
+    done(link)
     print("done")
     if boot:
         link.boot()

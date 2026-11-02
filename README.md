@@ -62,10 +62,11 @@ Measured on that cartridge with a 4 MiB Apotris image:
 | Full read, 4 MiB | ~2.3 min |
 | SRAM dump / verified restore (64 KiB) | 2.6 s / 6.8 s |
 
-The GBA draws two progress bars while FlashGBLink writes: **green** for the
-write phase and **cyan** for verification. A short or stalled transfer is
-recovered in place — buffer drained, framing re-synced, command retried —
-instead of wedging the link.
+The GBA draws labelled progress bars while FlashGBLink writes: **green** for
+the write phase and **cyan** for verification, with live percentages. When the
+operation completes it shows **FLASH COMPLETE / RESTART GBA TO PLAY**. A short or stalled
+transfer is recovered in place — buffer drained, framing re-synced, command
+retried — instead of wedging the link.
 
 Not implemented yet: EEPROM and save-flash writes, and cartridges that need
 flash bank switching (over 32 MiB).
@@ -331,6 +332,7 @@ reached with the same commands.
 | `0x5A3000` | read: next words are address and count, then `count` dummies |
 | `0x5A5000` | write block: next words are address and packed word count, then data |
 | `0x5A0060nn` / `0x5A0160nn` | draw `nn`% on the write (green) / verify (cyan) bar |
+| `0x5AA000` | show the FLASH COMPLETE / RESTART GBA TO PLAY screen |
 | `0x5A7000` | read bytes: next words are address and byte count, then dummies |
 | `0x5A8000` | write bytes: next words are address and byte count, then packed data |
 | `0x5A40nn` | soft reset into the cartridge |

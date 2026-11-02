@@ -67,6 +67,14 @@ class FramingTests(unittest.TestCase):
                          (flash.HDR_MAGIC << 24) | (flash.OP_PROGRESS << 8) | 42)
         self.assertEqual(words[-1], flash.PING)
 
+    def test_done_frames_the_completion_opcode(self):
+        link = RecordingLink()
+        flash.done(link)
+        words = link.sent[0]
+        self.assertEqual(words[0],
+                         (flash.HDR_MAGIC << 24) | (flash.OP_DONE << 8))
+        self.assertEqual(words[-1], flash.PING)
+
     def test_progress_phase_selects_the_verify_bar(self):
         link = RecordingLink()
         flash.progress(link, 42, phase=1)
