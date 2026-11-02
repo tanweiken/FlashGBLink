@@ -19,6 +19,7 @@ import time
 from FlashGBX.LK_Device import LK_Device
 from FlashGBX.Logging import dprint
 
+from . import __version__
 from .log import log
 from .gbalink import (BLOCK_BYTES, Link, ProtocolError, ST_OK, done,
                       encode_write_plan, progress, read_region, write_block)
@@ -184,7 +185,7 @@ class GbxDevice(LK_Device):
         self.MODE = None
 
     def GetFirmwareVersion(self, more=False):
-        return "payload"
+        return "{} (RAM payload)".format(__version__)
 
     def ChangeBaudRate(self, baudrate):
         return False

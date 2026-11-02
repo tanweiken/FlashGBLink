@@ -55,6 +55,16 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(self.device.GetName(), expected)
         self.assertEqual(self.device.GetFullName(), expected)
 
+    def test_firmware_version_reports_the_release(self):
+        import flashgblink
+        import flashgblink_plugin
+
+        self.assertNotEqual(flashgblink.__version__, "unknown")
+        self.assertEqual(flashgblink_plugin.PLUGIN_VERSION,
+                         flashgblink.__version__)
+        self.assertEqual(self.device.GetFirmwareVersion(),
+                         "{} (RAM payload)".format(flashgblink.__version__))
+
 
 
     def test_flashcart_detects_the_chip_through_the_adapter(self):
