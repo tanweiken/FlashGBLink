@@ -4,7 +4,7 @@ FlashGBX's architecture assumes a cartridge reader whose *firmware* knows how
 to program flash chips: ``LK_Device`` sends small commands such as
 ``AGB_CART_READ``, ``FLASH_PROGRAM`` and ``SET_FLASH_CMD``, and the firmware on
 the other end does the bus work.  This module implements the subset of that
-firmware which the GBA payload can service, on top of :mod:`gbalink`.
+firmware which the GBA payload can service, on top of :mod:`flashgblink.gbalink`.
 
 The payload lives in the GBA's RAM and is uploaded over multiboot, so the
 device only appears once the payload is running.  Uploading is intentionally
@@ -19,8 +19,8 @@ import time
 from FlashGBX.LK_Device import LK_Device
 from FlashGBX.Logging import dprint
 
-from gbalink import (BLOCK_BYTES, Link, ProtocolError, ST_OK, encode_write_plan,
-                     progress, read_region, write_block)
+from .gbalink import (BLOCK_BYTES, Link, ProtocolError, ST_OK, encode_write_plan,
+                      progress, read_region, write_block)
 
 SAVE_BASE = 0x0E000000
 

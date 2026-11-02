@@ -37,8 +37,10 @@ ST_BAD = 0xA5A500E1
 # payload can still be holding (a full 4 KiB block write, then some).
 RESYNC_WORDS = 1100
 
-ROOT = Path(__file__).resolve().parent.parent
-PAYLOAD = ROOT / "payload" / "flasher.gba"
+PACKAGE_DIR = Path(__file__).resolve().parent.parent
+PAYLOAD = PACKAGE_DIR / "payload" / "flasher.gba"
+if not PAYLOAD.is_file():
+    PAYLOAD = PACKAGE_DIR.parent / "payload" / "flasher.gba"
 BLOCK_BYTES = 4096
 
 

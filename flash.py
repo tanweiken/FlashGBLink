@@ -31,7 +31,7 @@ from pathlib import Path
 from flashgbx import (ProfileError, ProtocolError, cfi_sector_regions,
                       find_config_dir, find_profile, load_profiles,
                       normalize_cfi, parse_cfi, relocate_commands, swap_bits)
-from gbalink import (ADDR_ABS, ADDR_PA, ADDR_SA, BLOCK_BYTES, HDR_MAGIC,
+from flashgblink.gbalink import (ADDR_ABS, ADDR_PA, ADDR_SA, BLOCK_BYTES, HDR_MAGIC,
                      OP_BOOT, OP_PROGRESS, OP_READ, OP_READ8, OP_SET_PLAN,
                      OP_WRITE8, OP_WRITE_BLOCK, OP_WRITE_SEQ, PAYLOAD, PING,
                      PLAN_MAX_COMMANDS, RESYNC_WORDS, ST_BAD, ST_OK,
@@ -39,8 +39,8 @@ from gbalink import (ADDR_ABS, ADDR_PA, ADDR_SA, BLOCK_BYTES, HDR_MAGIC,
                      WAIT_SA, Link, PlanError, TransferError, _check_status,
                      _hex, _pack_words, find_port, progress, read_region,
                      single_write_waits, write_block)
-from gbalink.plan import encode_write_plan as plan_encode_write_plan
-from gbalink.plan import prepare_write as plan_prepare_write
+from flashgblink.gbalink.plan import encode_write_plan as plan_encode_write_plan
+from flashgblink.gbalink.plan import prepare_write as plan_prepare_write
 
 # -- M36L0R8060B / Intel command set, from FlashGBX fc_AGB_M36L0R806.txt --
 # Kept as the fallback for `id` and `cfi` when no profile is loaded.

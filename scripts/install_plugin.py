@@ -5,7 +5,6 @@ Copies exactly what FlashGBX needs:
 
     <plugins>/flashgblink_plugin.py
     <plugins>/flashgblink/
-    <plugins>/gbalink/
 
 The script finds the FlashGBX configuration directory automatically.  Pass
 ``--plugins-dir`` or set ``FLASHGBLINK_PLUGIN_DIR`` if it guesses wrong.
@@ -20,7 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_FILE = ROOT / "flashgblink_plugin.py"
-PLUGIN_DIRS = ("flashgblink", "gbalink")
+PLUGIN_DIRS = ("flashgblink",)
 
 
 def candidates():
@@ -69,6 +68,7 @@ def install(target, dry_run=False):
         print("would copy %s" % PLUGIN_FILE.name)
         for name in PLUGIN_DIRS:
             print("would copy %s/" % name)
+        print("would copy the payload into flashgblink/payload/")
         return
     try:
         target.mkdir(parents=True, exist_ok=True)
@@ -80,6 +80,18 @@ def install(target, dry_run=False):
             shutil.copytree(
                 ROOT / name, destination,
                 ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        # Remove the old two-package layout if this checkout had it.
+        old_gbalink = target / "gbalink"
+        if old_gbalink.is_dir():
+            shutil.rmtree(old_gbalink)
+        payload = ROOT / "payload" / "flasher.gba"
+        if payload.is_file():
+            destination = target / "flashgblink" / "payload"
+            destination.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(payload, destination / payload.name)
+        else:
+            print("warning: payload/flasher.gba is missing; run "
+                  "`make -C payload` for Connect auto-upload.")
     except PermissionError:
         raise SystemExit(
             "permission denied writing to %s; run with sudo or pass "

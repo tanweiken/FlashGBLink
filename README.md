@@ -23,8 +23,11 @@ the payload.
 
 ```
 flashgblink/            FlashGBX device plugin (the primary use case)
+  device.py             AGB device backend
+  upload.py             payload/gbasend discovery and upload command
+  gui.py                Connect auto-upload dialog
+  gbalink/              host transport and write-plan encoding
 flashgblink_plugin.py   plugin entry point for FlashGBX's plugins directory
-gbalink/                host-side link transport and write-plan encoding
 flash.py                standalone CLI (alternative, uses FlashGBX's profiles)
 flashgbx.py             CLI profile loader and FlashGBX CFI adapter
 payload/                GBA-side flasher source
@@ -74,11 +77,12 @@ flash bank switching (over 32 MiB).
 | Piece | Source | Destination | How often |
 |---|---|---|---|
 | Pico firmware | `firmware/gbasend-pico.uf2` | Pico via BOOTSEL | once |
-| GBA payload | `payload/flasher.gba` | GBA RAM via USB | every power-on |
-| FlashGBLink plugin | `flashgblink_plugin.py`, `flashgblink/`, `gbalink/` | FlashGBX `plugins/` directory | once, and after updates |
+| GBA payload | `payload/flasher.gba` (bundled in the plugin) | GBA RAM via USB | every power-on |
+| FlashGBLink plugin | `flashgblink_plugin.py` + `flashgblink/` | FlashGBX `plugins/` directory | once, and after updates |
+| gbasend CLI | `gbasend-rs` build | PC, on `PATH` or `FLASHGBLINK_GBASEND` | once |
 | Flashcart profiles | FlashGBX's own database | nothing to copy | already installed |
 
-The installer below copies exactly the three plugin items. You do not need to
+The installer below copies exactly one file and one folder. You do not need to
 copy files by hand.
 
 ### One-time setup
@@ -107,6 +111,9 @@ copy files by hand.
 
    FlashGBLink needs FlashGBX **5.2.1 or newer** for its plugin system. If PyPI
    still installs an older release, install FlashGBX from its `master` branch.
+   The plugin's Connect auto-upload also needs the `gbasend` executable; put it
+   on `PATH`, in `flashgblink/bin/gbasend`, or via `FLASHGBLINK_GBASEND` /
+   `FlashGBLinkGbasend` in `settings.ini`.
 
 4. **Build the payload.**
 
@@ -125,8 +132,9 @@ copy files by hand.
    ```
 
    The script finds the macOS app bundle or the platform FlashGBX config
-   directory and copies `flashgblink_plugin.py`, `flashgblink/` and `gbalink/`
-   into its `plugins/` folder. Useful flags:
+   directory and copies `flashgblink_plugin.py` and the `flashgblink/` folder
+   (including `gbalink/` and the payload) into its `plugins/` folder. Useful
+   flags:
 
    ```sh
    .venv/bin/python3 scripts/install_plugin.py --dry-run
@@ -151,40 +159,47 @@ copy files by hand.
    `FLASHGBLINK_ROOT=/path/to/FlashGBLink` so it loads the packages from this
    checkout.
 
-6. **Start FlashGBX once.** Approve **FlashGBLink** when prompted. The device
-   appears only while the payload is running.
+6. **Start FlashGBX once.** Approve **FlashGBLink** when prompted.
 
 ### Every session
 
 1. Insert the cartridge and power the GBA off.
 2. Hold **START+SELECT** and power it on, so the BIOS waits for multiboot.
-3. Start the uploader, *then* power on the GBA. The uploader waits for the
-   console (60 seconds by default, or forever with `--handshake-wait 0`):
+3. In FlashGBX click **Connect → FlashGBLink**. If the payload is not running,
+   a FlashGBLink dialog says “Hold START+SELECT and power on the GBA”, runs
+   `gbasend`, and connects as soon as the payload answers. The dialog stays
+   responsive and has a Cancel button.
+4. Use Detect / Backup ROM / Write ROM / Backup Save / Restore Save. The GBA
+   shows a green write bar, then a cyan verify bar.
 
-   ```sh
-   .venv/bin/python3 flash.py upload --gbasend $GBASEND --handshake-wait 0
-   ```
+If `gbasend` is not available, the dialog says so and points to
+`FLASHGBLINK_GBASEND`; you can always fall back to the manual uploader:
 
-   Hold **START+SELECT** while switching the GBA on; the payload uploads as soon
-   as the BIOS offers the multiboot handshake.
+```sh
+.venv/bin/python3 flash.py upload --gbasend $GBASEND --handshake-wait 0
+```
 
-4. In FlashGBX: Connect → FlashGBLink, then Detect / Backup ROM / Write ROM /
-   Backup Save / Restore Save. The GBA shows a green write bar, then a cyan
-   verify bar.
+Start that before powering the GBA on; it waits for the console.
 
-The payload stays resident until the GBA is reset or powered off. FlashGBX does
-not upload during device discovery, because the GBA has to be waiting in
-multiboot first.
+The payload stays resident until the GBA is reset or powered off.
 
-### Why can't the Pico upload automatically?
+### Cross-platform notes
+
+The plugin is pure Python and works anywhere FlashGBX runs. `gbasend` is a Rust
+CLI and builds on macOS, Linux and Windows; only that binary is platform
+specific. Put your build in `flashgblink/bin/gbasend` (or `.exe` on Windows),
+add it to `PATH`, or set `FLASHGBLINK_GBASEND` / `FlashGBLinkGbasend` in
+FlashGBX's `settings.ini`. The release plugin zip does not ship platform
+binaries; the payload is included.
+
+### Why is START+SELECT still needed?
 
 The GBA BIOS only listens for multiboot when **START+SELECT** is held at
 power-on. The link port has no reset or boot-mode line, so software cannot put a
-running console into that state. Starting `flash.py upload` first is the
-practical automation: the uploader blocks until the GBA appears, and the only
-manual step is holding the buttons while switching it on. A Pico firmware with
-the payload embedded could remove the PC upload step, but not the button hold on
-unmodified hardware.
+running console into that state. FlashGBLink automates the upload itself, but
+the button hold remains the deliberate “ready for flashing” step. A Pico
+firmware with the payload embedded could remove the PC upload step, but not the
+button hold on unmodified hardware.
 
 Check the host setup and installed plugin at any time:
 
@@ -195,7 +210,8 @@ Check the host setup and installed plugin at any time:
 ## CLI
 
 The CLI uses the same payload and does not need the plugin, but it does use
-FlashGBX's installed profile database and `Flashcart`/`CFI` classes:
+FlashGBX's installed profile database and `Flashcart`/`CFI` classes. The manual
+upload there is also the fallback when the plugin's auto-upload is unavailable:
 
 ```sh
 PY=.venv/bin/python3
@@ -281,9 +297,9 @@ and a save that was never dumped is gone.
   cartridge stores/loads, byte-wide save access, the progress bars and a soft
   reset, and holds the profile's write template.
 - **FlashGBLink plugin** (`flashgblink/`) implements the AGB-relevant subset of
-  FlashGBX's device protocol on top of `gbalink/`, so FlashGBX's `LK_Device`,
+  FlashGBX's device protocol on top of `flashgblink/gbalink/`, so FlashGBX's `LK_Device`,
   `Flashcart` and profile database run unchanged.
-- **CLI** (`flash.py`) uses the same `gbalink/` transport and FlashGBX's
+- **CLI** (`flash.py`) uses the same `flashgblink/gbalink/` transport and FlashGBX's
   `Flashcart`/CFI for detection, plus a delta image writer.
 
 ## Limitations

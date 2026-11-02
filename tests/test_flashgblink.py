@@ -77,7 +77,7 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(cfi["device_size"], 0x2000000)
 
     def test_initialize_activates_a_running_payload(self):
-        from gbalink import ST_OK
+        from flashgblink.gbalink import ST_OK
 
         class FakeSerial:
             def close(self):
@@ -108,7 +108,7 @@ class AdapterTests(unittest.TestCase):
         self.assertIn("X", self.device.GetSupportedCartridgesAGB()[0])
 
     def test_plan_matches_the_m36_profile(self):
-        from gbalink import ADDR_PA, ADDR_SA, VAL_BS, VAL_PD
+        from flashgblink.gbalink import ADDR_PA, ADDR_SA, VAL_BS, VAL_PD
 
         chunk, words = self.device_module.encode_write_plan(
             self.profile["commands"], 64, command_set="INTEL",

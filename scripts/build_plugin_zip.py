@@ -5,7 +5,6 @@ The archive extracts directly into FlashGBX's ``plugins`` directory:
 
     flashgblink_plugin.py
     flashgblink/
-    gbalink/
     INSTALL.txt
 """
 
@@ -15,7 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "dist" / "FlashGBLink-plugin.zip"
 FILES = ("flashgblink_plugin.py",)
-DIRS = ("flashgblink", "gbalink")
+DIRS = ("flashgblink",)
 INSTALL = """FlashGBLink plugin
 ===================
 
@@ -34,7 +33,6 @@ The result should be:
 
   plugins/flashgblink_plugin.py
   plugins/flashgblink/
-  plugins/gbalink/
 
 Start FlashGBX, approve FlashGBLink when prompted, then connect to it.
 The GBA must already be running the flasher payload; see the project README.
@@ -53,6 +51,11 @@ def main():
                 if "__pycache__" in path.parts or path.suffix == ".pyc":
                     continue
                 archive.write(path, str(path.relative_to(ROOT)))
+        payload = ROOT / "payload" / "flasher.gba"
+        if payload.is_file():
+            archive.write(payload, "flashgblink/payload/flasher.gba")
+        else:
+            print("warning: payload/flasher.gba is missing")
         archive.writestr("INSTALL.txt", INSTALL)
     print(OUT)
     print("%d bytes" % OUT.stat().st_size)

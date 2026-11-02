@@ -17,7 +17,7 @@ import re
 import sys
 from pathlib import Path
 
-from gbalink.errors import ProtocolError
+from flashgblink.gbalink.errors import ProtocolError
 
 _HEX = re.compile(r"0x[0-9A-Fa-f]+")
 
