@@ -35,7 +35,9 @@ The result should be:
   plugins/flashgblink/
 
 Start FlashGBX, approve FlashGBLink when prompted, then connect to it.
-The GBA must already be running the flasher payload; see the project README.
+Hold START+SELECT while powering the GBA on; the Connect dialog can upload the
+payload automatically using gbasend.  The project README documents the
+manual/headless fallback.
 """
 
 

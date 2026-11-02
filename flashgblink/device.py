@@ -7,10 +7,10 @@ the other end does the bus work.  This module implements the subset of that
 firmware which the GBA payload can service, on top of :mod:`flashgblink.gbalink`.
 
 The payload lives in the GBA's RAM and is uploaded over multiboot, so the
-device only appears once the payload is running.  Uploading is intentionally
-not part of ``Initialize``: FlashGBX probes ports in worker threads during
-device discovery, and the GBA has to be powered on holding START+SELECT first.
-Use ``python3 flash.py upload`` for that step.
+device only appears once the payload is running.  ``Initialize`` expects a
+running payload.  In the FlashGBX GUI, the plugin's Connect hook offers to run
+``gbasend`` first (the GBA must be powered on holding START+SELECT).  The
+``flash.py upload`` command remains the manual/headless fallback.
 """
 
 import os
@@ -39,9 +39,9 @@ class GbxDevice(LK_Device):
     DEVICE_LABEL_LONG = "FlashGBLink (GBA link port)"
     DEVICE_LABEL_SHORT = "FlashGBLink"
     DEVICE_SUPPORT_MESSAGE = (
-        "FlashGBLink uses the GBA link port and a Raspberry Pi Pico. The GBA "
-        "must be running the flasher payload. Hold START+SELECT while powering "
-        "the GBA on and upload it with `python3 flash.py upload`.")
+        "FlashGBLink uses the GBA link port and a Raspberry Pi Pico. Hold "
+        "START+SELECT while powering the GBA on; the Connect dialog can upload "
+        "the flasher payload automatically.")
 
     def __init__(self):
         self.LINK = None
@@ -267,8 +267,8 @@ class GbxDevice(LK_Device):
             "info_type": "msgbox_critical",
             "info_msg": (
                 "This operation needs a cartridge power cycle. Power the GBA "
-                "off and on while holding START+SELECT, run "
-                "`python3 flash.py upload`, then click Connect again."),
+                "off and on while holding START+SELECT, then click Connect "
+                "again; FlashGBLink will upload the payload."),
             "abortable": False,
         })
         return False

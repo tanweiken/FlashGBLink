@@ -138,8 +138,8 @@ buffered-write loop, so its size and hash changed:
 
 | Item | Now |
 |---|---|
-| Payload | `payload/flasher.gba`, 3216 bytes, sha256 `c3d959a4bbb2c0a02de9e16368b8cef2dfa792f1ce7c52b019cbe253d2c05caf` |
-| New opcode | `0x5A9000` install write template (chunk bytes, command count, 4 words per command) |
+| Payload | `payload/flasher.gba`, 3312 bytes, sha256 `7f5ffe507a0b33b551f3fd2b16f32762395ae6aba24cd6d65418a8bbd4c6fe4c` |
+| New opcodes | `0x5A9000` install write template; `0x5A0060nn` / `0x5A0160nn` write/verify progress bars |
 | Host | `flash.py` autodetects the profile, then installs its buffer/single-write template |
 
 The M36 identity, CFI and timings above still apply: the detected profile is
@@ -170,3 +170,17 @@ The adapter's write path erases every sector in the image (FlashGBX behaviour);
 the `.flash-state.json` delta fast path remains a `flash.py image` feature.  The
 state file still describes the previous Apotris image after these writes, so the
 next `flash.py image` reads the cartridge back and refreshes it.
+
+
+## Connect auto-upload
+
+Recorded 2026-11-02.  With the payload absent and the GBA in the BIOS
+START+SELECT wait, clicking Connect in FlashGBX opens a cancellable dialog and
+runs the bundled `gbasend` against the plugin's `flasher.gba`.
+
+The first `Initialize` after `gbasend` exits can still receive the tail of the
+multiboot stream (`0x00FF94EF`, then `0xFFFFFFFF`) instead of a payload status.
+`Initialize` now drains and retries the ping for up to 2 s; the GUI also probes
+quietly and retries discovery once.  After that the first Connect succeeds
+without a manual reconnect.  The plugin writes these events to
+`<FlashGBX config>/flashgblink.log`.

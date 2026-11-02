@@ -191,7 +191,7 @@ class Link:
     def _unrecovered():
         return ProtocolError(
             "link did not recover; replug the Pico's USB cable, power the GBA "
-            "off and on holding START+SELECT, then run `flash.py upload`")
+            "off and on holding START+SELECT, then upload the payload again")
 
     def xfer_with_recovery(self, words, timeout=5.0):
         try:
@@ -216,7 +216,8 @@ class Link:
             self.drain()
             time.sleep(0.05)
         raise ProtocolError(
-            "no payload response; upload it with `flash.py upload` first")
+            "no payload response; upload the payload with FlashGBLink/Connect "
+            "or `flash.py upload` first")
 
     def write_seq(self, pairs, timeout=5.0):
         for start in range(0, len(pairs), 200):
