@@ -127,8 +127,8 @@ copy files by hand.
 5. **Install the FlashGBLink plugin.**
 
    ```sh
-   make install-plugin
-   # or: .venv/bin/python3 scripts/install_plugin.py
+   .venv/bin/python3 scripts/install_plugin.py --gbasend "$GBASEND"
+   # or: make install-plugin (then add gbasend to PATH yourself)
    ```
 
    The script finds the macOS app bundle or the platform FlashGBX config

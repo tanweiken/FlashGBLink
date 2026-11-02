@@ -61,7 +61,7 @@ def find_plugin_dir(explicit=None):
         "Pass --plugins-dir or set FLASHGBLINK_PLUGIN_DIR." % listing)
 
 
-def install(target, dry_run=False):
+def install(target, dry_run=False, gbasend=None):
     target = Path(target)
     print("FlashGBX plugins: %s" % target)
     if dry_run:
@@ -69,6 +69,8 @@ def install(target, dry_run=False):
         for name in PLUGIN_DIRS:
             print("would copy %s/" % name)
         print("would copy the payload into flashgblink/payload/")
+        if gbasend:
+            print("would copy gbasend from %s" % gbasend)
         return
     try:
         target.mkdir(parents=True, exist_ok=True)
@@ -92,6 +94,17 @@ def install(target, dry_run=False):
         else:
             print("warning: payload/flasher.gba is missing; run "
                   "`make -C payload` for Connect auto-upload.")
+        if gbasend:
+            source = Path(gbasend).expanduser()
+            if not source.is_file():
+                raise SystemExit("gbasend not found: %s" % source)
+            bin_dir = target / "flashgblink" / "bin"
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            name = "gbasend.exe" if source.suffix.lower() == ".exe" else "gbasend"
+            shutil.copy2(source, bin_dir / name)
+        else:
+            print("note: gbasend was not copied; put it on PATH or pass "
+                  "--gbasend /path/to/gbasend.")
     except PermissionError:
         raise SystemExit(
             "permission denied writing to %s; run with sudo or pass "
@@ -115,6 +128,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plugins-dir",
                         help="FlashGBX plugins directory (auto-detected)")
+    parser.add_argument("--gbasend",
+                        help="copy this gbasend binary into flashgblink/bin")
     parser.add_argument("--dry-run", action="store_true",
                         help="show what would be copied")
     parser.add_argument("--uninstall", action="store_true",
@@ -124,7 +139,7 @@ def main(argv=None):
     if args.uninstall:
         uninstall(target)
     else:
-        install(target, dry_run=args.dry_run)
+        install(target, dry_run=args.dry_run, gbasend=args.gbasend)
     return 0
 
 
