@@ -20,13 +20,16 @@ Options:
   --boot             boot the cartridge after each write (default)
   --no-boot          keep the payload resident for batch flashing
   --dry-run          print the command without running it
-  --rom PATH         use a different .gba image
-  --profile NAME     use a different FlashGBX profile
-  --gbasend PATH     use a different gbasend binary
-  --port PORT        serial port for flashing and upload
-  --config DIR       FlashGBX profile directory instead of autodetect
-  --handshake-wait N seconds to wait for the START+SELECT upload (default 120)
-  --interval S       seconds between ROM checks while watching (default 1)
+  --rom PATH         use a different .gba image (saved on success)
+  --profile NAME     use a different FlashGBX profile (saved on success)
+  --gbasend PATH     use a different gbasend binary (saved on success)
+  --port PORT        serial port for flashing and upload (saved on success)
+  --baud HZ          data-phase SPI clock (saved on success)
+  --upload-baud HZ   multiboot SPI clock (saved on success)
+  --payload FILE     GBA payload .gba (saved on success)
+  --config DIR       FlashGBX profile directory (saved on success)
+  --handshake-wait N seconds to wait for START+SELECT (saved on success)
+  --interval S       seconds between ROM checks (saved on success)
   -h, --help         show this help
 
 Watch mode boots after each flash. Booting ends the payload, so before the next
@@ -38,8 +41,17 @@ Environment:
   APOTRIS_ROM        full path to the .gba image
   APOTRIS_PROFILE    FlashGBX profile name
   APOTRIS_GBASEND    path to gbasend
+  APOTRIS_PORT       serial port
+  APOTRIS_BAUD       data-phase SPI clock
+  APOTRIS_UPLOAD_BAUD  multiboot SPI clock
+  APOTRIS_PAYLOAD    GBA payload .gba
   APOTRIS_HANDSHAKE_WAIT  seconds to wait for START+SELECT (default 120)
   APOTRIS_POLL_INTERVAL   seconds between ROM checks (default 1)
+  APOTRIS_SETTINGS   settings file (default: ~/.config/flashgbblink/apotris.conf)
+
+Path and transport options are remembered in the settings file after a
+successful flash. Environment variables override saved values, and command-line
+options override both. Delete the settings file to return to the defaults.
 
 Build the GBA ROM in the Apotris Docker container:
 
@@ -56,25 +68,78 @@ EOF
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 PYTHON=${PYTHON:-$ROOT/.venv/bin/python3}
+DEFAULT_PROFILE="2006-36-71_V2 with M36L0R8060B"
+SETTINGS_FILE=${APOTRIS_SETTINGS:-${XDG_CONFIG_HOME:-$HOME/.config}/flashgbblink/apotris.conf}
 APOTRIS_ROOT=${APOTRIS_ROOT:-$HOME/apotris}
-ROM=${APOTRIS_ROM:-$APOTRIS_ROOT/build-gba/Apotris.gba}
-PROFILE=${APOTRIS_PROFILE:-2006-36-71_V2 with M36L0R8060B}
 
-if [[ -n ${APOTRIS_GBASEND:-} ]]; then
-	GBASEND=$APOTRIS_GBASEND
-elif command -v gbasend >/dev/null 2>&1; then
-	GBASEND=$(command -v gbasend)
-elif [[ -x $ROOT/../gbasend-rs/gbasend-cli/target/release/gbasend ]]; then
-	GBASEND=$ROOT/../gbasend-rs/gbasend-cli/target/release/gbasend
-else
-	GBASEND=gbasend
+S_PROFILE=""
+S_CONFIG=""
+S_ROM=""
+S_GBASEND=""
+S_PORT=""
+S_BAUD=""
+S_UPLOAD_BAUD=""
+S_PAYLOAD=""
+S_HANDSHAKE_WAIT=""
+S_POLL_INTERVAL=""
+if [[ -f $SETTINGS_FILE ]]; then
+	while IFS='=' read -r key value; do
+		case $key in
+			PROFILE) S_PROFILE=$value ;;
+			CONFIG) S_CONFIG=$value ;;
+			ROM) S_ROM=$value ;;
+			GBASEND) S_GBASEND=$value ;;
+			PORT) S_PORT=$value ;;
+			BAUD) S_BAUD=$value ;;
+			UPLOAD_BAUD) S_UPLOAD_BAUD=$value ;;
+			PAYLOAD) S_PAYLOAD=$value ;;
+			HANDSHAKE_WAIT) S_HANDSHAKE_WAIT=$value ;;
+			POLL_INTERVAL) S_POLL_INTERVAL=$value ;;
+		esac
+	done < "$SETTINGS_FILE"
 fi
+
+PROFILE=${APOTRIS_PROFILE:-${S_PROFILE:-$DEFAULT_PROFILE}}
+CONFIG_DIR=${FLASHGBLINK_CONFIG:-${S_CONFIG:-}}
+ROM=${APOTRIS_ROM:-${S_ROM:-$APOTRIS_ROOT/build-gba/Apotris.gba}}
+PORT=${APOTRIS_PORT:-${S_PORT:-}}
+BAUD=${APOTRIS_BAUD:-${S_BAUD:-}}
+UPLOAD_BAUD=${APOTRIS_UPLOAD_BAUD:-${S_UPLOAD_BAUD:-}}
+PAYLOAD=${APOTRIS_PAYLOAD:-${S_PAYLOAD:-}}
+handshake_wait=${APOTRIS_HANDSHAKE_WAIT:-${S_HANDSHAKE_WAIT:-120}}
+poll_interval=${APOTRIS_POLL_INTERVAL:-${S_POLL_INTERVAL:-1}}
+
+GBASEND=${APOTRIS_GBASEND:-$S_GBASEND}
+if [[ -z $GBASEND ]]; then
+	if command -v gbasend >/dev/null 2>&1; then
+		GBASEND=$(command -v gbasend)
+	elif [[ -x $ROOT/../gbasend-rs/gbasend-cli/target/release/gbasend ]]; then
+		GBASEND=$ROOT/../gbasend-rs/gbasend-cli/target/release/gbasend
+	else
+		GBASEND=gbasend
+	fi
+fi
+
+save_settings() {
+	mkdir -p "$(dirname "$SETTINGS_FILE")"
+	{
+		printf 'PROFILE=%s\n' "$S_PROFILE"
+		printf 'CONFIG=%s\n' "$S_CONFIG"
+		printf 'ROM=%s\n' "$S_ROM"
+		printf 'GBASEND=%s\n' "$S_GBASEND"
+		printf 'PORT=%s\n' "$S_PORT"
+		printf 'BAUD=%s\n' "$S_BAUD"
+		printf 'UPLOAD_BAUD=%s\n' "$S_UPLOAD_BAUD"
+		printf 'PAYLOAD=%s\n' "$S_PAYLOAD"
+		printf 'HANDSHAKE_WAIT=%s\n' "$S_HANDSHAKE_WAIT"
+		printf 'POLL_INTERVAL=%s\n' "$S_POLL_INTERVAL"
+	} > "$SETTINGS_FILE"
+}
 
 boot=1
 watch=0
 dry_run=0
-handshake_wait=${APOTRIS_HANDSHAKE_WAIT:-120}
-poll_interval=${APOTRIS_POLL_INTERVAL:-1}
+save_pending=0
 flash_args=()
 common_args=()
 
@@ -100,19 +165,53 @@ while (($#)); do
 			dry_run=1
 			shift
 			;;
-		--port|--upload-baud|--payload|--config)
-			[[ $# -ge 2 ]] || { echo "error: $1 needs a value" >&2; exit 2; }
-			common_args+=("$1" "$2")
+		--port)
+			[[ $# -ge 2 ]] || { echo "error: --port needs a value" >&2; exit 2; }
+			PORT=$2
+			S_PORT=$PORT
+			save_pending=1
+			shift 2
+			;;
+		--baud)
+			[[ $# -ge 2 ]] || { echo "error: --baud needs a value" >&2; exit 2; }
+			BAUD=$2
+			S_BAUD=$BAUD
+			save_pending=1
+			shift 2
+			;;
+		--upload-baud)
+			[[ $# -ge 2 ]] || { echo "error: --upload-baud needs a value" >&2; exit 2; }
+			UPLOAD_BAUD=$2
+			S_UPLOAD_BAUD=$UPLOAD_BAUD
+			save_pending=1
+			shift 2
+			;;
+		--payload)
+			[[ $# -ge 2 ]] || { echo "error: --payload needs a path" >&2; exit 2; }
+			PAYLOAD=$2
+			S_PAYLOAD=$PAYLOAD
+			save_pending=1
+			shift 2
+			;;
+		--config)
+			[[ $# -ge 2 ]] || { echo "error: --config needs a directory" >&2; exit 2; }
+			CONFIG_DIR=$2
+			S_CONFIG=$CONFIG_DIR
+			save_pending=1
 			shift 2
 			;;
 		--handshake-wait)
 			[[ $# -ge 2 ]] || { echo "error: --handshake-wait needs seconds" >&2; exit 2; }
 			handshake_wait=$2
+			S_HANDSHAKE_WAIT=$handshake_wait
+			save_pending=1
 			shift 2
 			;;
 		--interval)
 			[[ $# -ge 2 ]] || { echo "error: --interval needs seconds" >&2; exit 2; }
 			poll_interval=$2
+			S_POLL_INTERVAL=$poll_interval
+			save_pending=1
 			shift 2
 			;;
 		--verbose)
@@ -122,16 +221,22 @@ while (($#)); do
 		--rom)
 			[[ $# -ge 2 ]] || { echo "error: --rom needs a path" >&2; exit 2; }
 			ROM=$2
+			S_ROM=$ROM
+			save_pending=1
 			shift 2
 			;;
 		--profile)
 			[[ $# -ge 2 ]] || { echo "error: --profile needs a name" >&2; exit 2; }
 			PROFILE=$2
+			S_PROFILE=$PROFILE
+			save_pending=1
 			shift 2
 			;;
 		--gbasend)
 			[[ $# -ge 2 ]] || { echo "error: --gbasend needs a path" >&2; exit 2; }
 			GBASEND=$2
+			S_GBASEND=$GBASEND
+			save_pending=1
 			shift 2
 			;;
 		-h|--help)
@@ -174,6 +279,21 @@ fi
 
 command=("$PYTHON" "$ROOT/flash.py" image "$ROM"
 	--profile "$PROFILE" --gbasend "$GBASEND")
+if [[ -n $CONFIG_DIR ]]; then
+	command+=(--config "$CONFIG_DIR")
+fi
+if [[ -n $PORT ]]; then
+	command+=(--port "$PORT")
+fi
+if [[ -n $BAUD ]]; then
+	command+=(--baud "$BAUD")
+fi
+if [[ -n $UPLOAD_BAUD ]]; then
+	command+=(--upload-baud "$UPLOAD_BAUD")
+fi
+if [[ -n $PAYLOAD ]]; then
+	command+=(--payload "$PAYLOAD")
+fi
 if ((boot)); then
 	command+=(--boot)
 fi
@@ -182,6 +302,15 @@ command+=("${flash_args[@]}")
 
 upload_command=("$PYTHON" "$ROOT/flash.py" upload
 	--gbasend "$GBASEND" --handshake-wait "$handshake_wait")
+if [[ -n $PORT ]]; then
+	upload_command+=(--port "$PORT")
+fi
+if [[ -n $UPLOAD_BAUD ]]; then
+	upload_command+=(--upload-baud "$UPLOAD_BAUD")
+fi
+if [[ -n $PAYLOAD ]]; then
+	upload_command+=(--payload "$PAYLOAD")
+fi
 upload_command+=("${common_args[@]}")
 
 if ((dry_run)); then
@@ -268,6 +397,10 @@ watch_loop() {
 						if ((boot)); then
 							needs_upload=1
 						fi
+						if ((save_pending)); then
+							save_settings
+							save_pending=0
+						fi
 					fi
 				fi
 			fi
@@ -278,6 +411,13 @@ watch_loop() {
 
 if ((watch)); then
 	watch_loop
+elif ((save_pending)); then
+	if "${command[@]}"; then
+		save_settings
+	else
+		status=$?
+		exit "$status"
+	fi
 else
 	exec "${command[@]}"
 fi

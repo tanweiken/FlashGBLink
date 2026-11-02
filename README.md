@@ -294,10 +294,18 @@ flashing several builds in a row, but it does not let you test the game.
 
 It reads `$HOME/apotris/build-gba/Apotris.gba` by default, resolves `gbasend`
 from `PATH` or the local gbasend-rs build, and uses the profile
-`2006-36-71_V2 with M36L0R8060B`. Override the paths with `--rom`,
-`--profile`, `--gbasend`, `--port`, or the `APOTRIS_ROOT`, `APOTRIS_ROM`,
-`APOTRIS_PROFILE`, `APOTRIS_GBASEND`, `APOTRIS_HANDSHAKE_WAIT`, and
-`APOTRIS_POLL_INTERVAL` environment variables.
+`2006-36-71_V2 with M36L0R8060B`. Override the defaults with `--rom`,
+`--profile`, `--gbasend`, `--port`, `--baud`, `--upload-baud`, `--payload`,
+`--config`, `--handshake-wait`, or `--interval`.
+
+After a successful flash, those options are saved to
+`~/.config/flashgbblink/apotris.conf`, so later runs reuse them. Set
+`APOTRIS_SETTINGS` to use a different file. Environment variables such as
+`APOTRIS_ROM`, `APOTRIS_PROFILE`, `APOTRIS_GBASEND`, `APOTRIS_PORT`,
+`APOTRIS_BAUD`, `APOTRIS_UPLOAD_BAUD`, `APOTRIS_PAYLOAD`,
+`APOTRIS_HANDSHAKE_WAIT`, and `APOTRIS_POLL_INTERVAL` override saved values;
+command-line options override both. Delete the settings file to return to the
+built-in defaults.
 
 #### Detecting and fixing the cartridge profile
 
@@ -330,8 +338,10 @@ scripts/apotris.sh --profile "PROFILE NAME"
 $PY flash.py image Apotris.gba --profile "PROFILE NAME" --boot
 ```
 
-If several profiles share an ID, choose the one whose PCB or flash-chip name
-matches the cartridge label.
+After a successful flash, the helper remembers `--profile` and `--config` along
+with the path and transport options. You do not need to repeat them on the next
+run. If several profiles share an ID, choose the one whose PCB or flash-chip
+name matches the cartridge label.
 
 If no installed profile matches, copy the closest `fc_AGB_*.txt` from
 FlashGBX's config directory into a local directory, for example
