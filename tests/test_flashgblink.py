@@ -50,6 +50,11 @@ class AdapterTests(unittest.TestCase):
     def tearDown(self):
         self.device_module.write_block = self.original_write_block
 
+    def test_device_name_describes_the_gba_cartridge_reader(self):
+        expected = "FlashGBLink GBA Cartridge Reader/Writer"
+        self.assertEqual(self.device.GetName(), expected)
+        self.assertEqual(self.device.GetFullName(), expected)
+
 
 
     def test_flashcart_detects_the_chip_through_the_adapter(self):

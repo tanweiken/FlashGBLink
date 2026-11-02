@@ -27,16 +27,16 @@ SAVE_BASE = 0x0E000000
 
 
 class GbxDevice(LK_Device):
-    DEVICE_NAME = "FlashGBLink"
+    DEVICE_NAME = "FlashGBLink GBA Cartridge Reader/Writer"
     DEVICE_MIN_FW = 1
     DEVICE_MAX_FW = 15
     DEVICE_LATEST_FW_TS = {}
-    PCB_VERSIONS = {1: "GBA link port"}
+    PCB_VERSIONS = {1: ""}
     BAUDRATE = 1_250_000
     MAX_BUFFER_READ = BLOCK_BYTES
     MAX_BUFFER_WRITE = BLOCK_BYTES
     USB_IDS = ((0x2E8A, 0x000A),)
-    DEVICE_LABEL_LONG = "FlashGBLink (GBA link port)"
+    DEVICE_LABEL_LONG = "FlashGBLink GBA Cartridge Reader/Writer"
     DEVICE_LABEL_SHORT = "FlashGBLink"
     DEVICE_SUPPORT_MESSAGE = (
         "FlashGBLink uses the GBA link port and a Raspberry Pi Pico. Hold "
