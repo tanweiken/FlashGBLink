@@ -1,9 +1,12 @@
 """FlashGBX GUI integration: upload the payload when Connect cannot see it."""
 
+import time
+
 from FlashGBX.Logging import dprint
 from FlashGBX.pyside import QtCore, QtWidgets
 
 from . import upload
+from .log import log as _log
 
 
 def _show_error(parent, message):
@@ -84,7 +87,9 @@ class UploadDialog:
 def _maybe_upload(parent, port=None):
     pico_port = upload.find_link_port()
     if not pico_port:
+        _log("FlashGBLink: no Pico serial port found")
         return False
+    _log("FlashGBLink: Connect check on %s" % pico_port)
     if port and port != pico_port:
         return False
     if upload.payload_running(pico_port):
@@ -108,7 +113,11 @@ def _maybe_upload(parent, port=None):
 
     dialog = UploadDialog(parent, pico_port, gbasend, payload)
     if dialog.run():
-        dprint("FlashGBLink: payload uploaded on", pico_port)
+        _log("FlashGBLink: payload uploaded on %s" % pico_port)
+        # Do not open the port again for a readiness ping: macOS needs a
+        # moment to release it, and a second open makes FlashGBX's discovery
+        # lose the race.  Let the payload settle instead.
+        time.sleep(1.0)
         return True
     if not dialog.cancelled:
         _show_error(
@@ -116,7 +125,7 @@ def _maybe_upload(parent, port=None):
             "The payload upload did not complete. Check that gbasend and the "
             "Pico are working, then try Connect again. Details are in the "
             "FlashGBX debug log.")
-    dprint("FlashGBLink: payload upload failed or was cancelled")
+    _log("FlashGBLink: payload upload failed or was cancelled")
     return False
 
 
@@ -131,20 +140,44 @@ def install_gui_hook():
 
     def FindDevices(self, connectToFirst=False, port=None, mode=None,
                     firstRun=False):
+        uploaded = False
         if not firstRun and getattr(self, "CONN", None) is None:
             if not getattr(self, "_flashgblink_upload_busy", False):
                 self._flashgblink_upload_busy = True
                 try:
-                    _maybe_upload(self, port)
+                    uploaded = _maybe_upload(self, port)
                 except Exception as error:
                     _show_error(
                         self, "FlashGBLink could not prepare the payload:\n%s"
                         % error)
                 finally:
                     self._flashgblink_upload_busy = False
-        return original(self, connectToFirst=connectToFirst, port=port,
-                        mode=mode, firstRun=firstRun)
+
+        if uploaded:
+            try:
+                from serial.tools import list_ports
+                _log("FlashGBLink: ports before discovery: %r"
+                     % [(p.device, p.vid, p.pid)
+                        for p in list_ports.comports()])
+            except Exception:
+                pass
+            # Probe quietly (firstRun suppresses the no-device dialog), then
+            # retry once after the port has settled.
+            original(self, connectToFirst=connectToFirst, port=port,
+                     mode=mode, firstRun=True)
+            if not getattr(self, "DEVICES", None):
+                time.sleep(1.0)
+                result = original(self, connectToFirst=connectToFirst,
+                                  port=port, mode=mode, firstRun=firstRun)
+            else:
+                result = True
+        else:
+            result = original(self, connectToFirst=connectToFirst, port=port,
+                              mode=mode, firstRun=firstRun)
+        _log("FlashGBLink: discovery returned %d device(s)"
+             % len(getattr(self, "DEVICES", {})))
+        return result
 
     cls.FindDevices = FindDevices
     cls._flashgblink_connect_hook = True
-    dprint("FlashGBLink: Connect upload hook installed")
+    _log("FlashGBLink: Connect upload hook installed")

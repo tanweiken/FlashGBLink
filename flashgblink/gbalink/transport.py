@@ -120,6 +120,9 @@ class Link:
             self.ser.close()
         except Exception:
             pass
+        if (self._reader.is_alive()
+                and self._reader is not threading.current_thread()):
+            self._reader.join(timeout=0.5)
 
     def xfer(self, words, timeout=5.0):
         # FlashGBX can check device liveness from another thread while a
@@ -205,10 +208,12 @@ class Link:
             try:
                 word = self.ping(timeout=0.5)
             except ProtocolError:
+                self.drain()
                 time.sleep(0.05)
                 continue
             if (word & 0xFFFF0000) == 0xA5A50000:
                 return word
+            self.drain()
             time.sleep(0.05)
         raise ProtocolError(
             "no payload response; upload it with `flash.py upload` first")

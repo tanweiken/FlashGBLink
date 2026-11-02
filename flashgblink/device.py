@@ -19,6 +19,7 @@ import time
 from FlashGBX.LK_Device import LK_Device
 from FlashGBX.Logging import dprint
 
+from .log import log
 from .gbalink import (BLOCK_BYTES, Link, ProtocolError, ST_OK, encode_write_plan,
                       progress, read_region, write_block)
 
@@ -82,6 +83,7 @@ class GbxDevice(LK_Device):
         self._replies = bytearray()
 
         ports = [port] if port is not None else self.GetCandidatePorts()
+        log("FlashGBLink Initialize: ports=%r" % (ports,))
         if not ports:
             return False
         baud = max(9600, min(int(max_baud or self.BAUDRATE), self.BAUDRATE))
@@ -89,13 +91,29 @@ class GbxDevice(LK_Device):
             link = None
             try:
                 link = Link(candidate, baud)
-                status = link.ping(timeout=0.5)
             except Exception as error:
-                dprint("FlashGBLink: no payload on {}: {}".format(candidate, error))
+                log("FlashGBLink Initialize: open failed on %s: %s"
+                    % (candidate, error))
                 if link is not None:
                     link.close()
                 continue
-            if (status & 0xFFFF0000) != ST_OK:
+
+            # Right after a multiboot upload the first words can still be the
+            # tail of the upload stream.  Give the payload a moment to settle.
+            status = None
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                try:
+                    status = link.ping(timeout=0.3)
+                except Exception:
+                    status = None
+                if status is not None and (status & 0xFFFF0000) == ST_OK:
+                    break
+                link.drain()
+                time.sleep(0.05)
+            if status is None or (status & 0xFFFF0000) != ST_OK:
+                log("FlashGBLink Initialize: no payload status on %s (last 0x%08X)"
+                    % (candidate, status or 0))
                 link.close()
                 continue
 
@@ -125,7 +143,7 @@ class GbxDevice(LK_Device):
             self.INFO = {"action": None, "last_action": None, "dump_info": {}}
             self._reset_cursors()
             self.UpdateFlashCarts(flashcarts)
-            dprint("FlashGBLink: payload on {}".format(candidate))
+            log("FlashGBLink Initialize: payload ok on %s" % candidate)
             return []
         return False
 
@@ -142,14 +160,17 @@ class GbxDevice(LK_Device):
         if self.LAST_CHECK_ACTIVE and time.monotonic() < self.LAST_CHECK_ACTIVE + 1:
             return True
         if self.DEVICE is None or self.LINK is None:
+            log("FlashGBLink CheckActive: no device/link")
             return False
         try:
             status = self.LINK.ping(timeout=0.3)
-        except Exception:
+        except Exception as error:
+            log("FlashGBLink CheckActive: ping failed: %s" % error)
             return False
         if (status & 0xFFFF0000) == ST_OK:
             self.LAST_CHECK_ACTIVE = time.monotonic()
             return True
+        log("FlashGBLink CheckActive: bad status 0x%08X" % status)
         return False
 
     def IsConnected(self):
