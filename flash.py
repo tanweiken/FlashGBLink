@@ -1127,7 +1127,8 @@ def main(argv=None):
             print_cfi(info)
         elif args.command == "read":
             # Read in link-sized chunks: a single multi-megabyte frame blocks
-            # the host's serial write while the Pico drains it.
+            # the host's serial write while the Pico drains it, and leaves the
+            # payload inside the read command waiting for words that never come.
             data = read_region(link, args.address, args.length)
             Path(args.output).write_bytes(data)
             print("wrote %d bytes to %s" % (args.length, args.output))
