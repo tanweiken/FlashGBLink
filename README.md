@@ -15,7 +15,7 @@ devices. A small payload boots into GBA RAM over the BIOS multiboot link, then
 bridges the Pico to the cartridge. During a write, the console shows live green
 write and cyan verification progress, then a completion screen.
 
-> **Experimental performance branch (plugin `0.3.0b2`).** This line paces the
+> **Experimental performance branch (plugin `0.3.0b3`).** This line paces the
 > link port by the GBA's SO ready line instead of a fixed per-word delay, and
 > carries the CRC32 delta work from `main` 0.2.3. On the tested 32 MiB
 > cartridge it reads 3.6× faster and does a verified 4 MiB write 2.7–2.8×
