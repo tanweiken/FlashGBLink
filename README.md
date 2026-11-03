@@ -50,8 +50,9 @@ tests here are roughly 3.8k lines; the value of the project depends heavily on
 the two upstream projects above.
 
 Special thanks to **akouzoukos**, developer of
-[Apotris](https://github.com/akouzoukos/apotris), for the game used as the
-4 MiB image that validated the full write and read-back path.
+[Apotris](https://github.com/akouzoukos/apotris) — the game that validated the
+full write and read-back path and that the
+[development loop example](examples/apotris/README.md) is built around.
 
 ## Get started
 
@@ -243,6 +244,13 @@ directory; default: autodetect FlashGBX's), `--profile` (profile name,
 skips autodetection), `--state` (delta state file),
 `FLASHGBLINK_CONFIG` (profile directory override),
 `--gbasend`, `--payload`, `--verbose`.
+
+## Use cases
+
+- **[Apotris development loop](examples/apotris/README.md)** — watch a homebrew
+  build, write only the changed sectors, verify, and boot the new build on the
+  console. One script turns a rebuild into a tested cartridge, and the same
+  pattern works for any GBA project with a fixed cartridge.
 
 ## Saves
 
