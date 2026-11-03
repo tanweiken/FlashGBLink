@@ -2,8 +2,8 @@
 
 Prebuilt RP2040 UF2 images from
 [nullstalgia/gbasend-rs](https://github.com/nullstalgia/gbasend-rs), commit
-`5b20987ec5b859cb8d8012f175501037c0598880` (2026-02-25), downloaded
-2026-11-01.
+`a72da50` (2026-11-02), plus the local SO flow-control change described below
+(not yet upstream), built and copied in on 2026-11-03.
 
 | File | Use |
 |---|---|
@@ -13,12 +13,45 @@ Prebuilt RP2040 UF2 images from
 SHA-256:
 
 ```
-c0f9cd3856d76c4387c30529f795ced955c133c39c1e9355e411139a6a219d17  gbasend-pico.uf2
-1570e07ec407b471a5e2bc9df34652013bcdd1b101d77edbd247bb391b75d510  gbasend-pico-rgb.uf2
+d3d7021e1efec7f5c68a17b55cb2b8cb160a12fd37574f12c3578b782d99edc1  gbasend-pico.uf2
+c2ab26077989698dd103d683d10fd4310f1377880039e8c8e41ea6acd061cbb6  gbasend-pico-rgb.uf2
 ```
 
 Both images report family `Raspberry Pi RP2040` (UF2 family ID `0xe48bff56`).
 They do not run on RP2350 boards (Pico 2, RP2350-LCD-1.47) or ESP32.
+
+## SO flow control
+
+Each word used to cost a fixed delay because the bridge could not tell whether
+the GBA had loaded its next reply. The GBA's payload now drives the SIO SO line
+high while it is busy and low once the reply is in the data register, and the
+bridge waits for SO low before clocking (2 µs arm, 5 µs settle). A transfer
+therefore costs as long as the GBA's own work plus 32 clocks, instead of a
+fixed 150 µs per word.
+
+The bridge starts with the original fixed delay and only probes for the
+handshake at or above 1 Mbaud, so the BIOS multiboot phase — which uses SO as its
+reply data line rather than as a ready line — is never clocked at flow-controlled
+speed. A low line alone is not accepted as proof: the bridge watches for the GBA
+to pull SO high after a word, which only a payload that implements the handshake
+does. If no busy edge appears within 2 s it falls back to the fixed delay for
+that session and tries again at the next session boundary (baud change or a
+second of USB idle). A steady-state wait is capped at 10 s so a dead GBA cannot
+wedge the bridge.
+
+Any pairing is safe:
+
+| Bridge | Payload | Result |
+|---|---|---|
+| new | new | SO-paced, the fast path |
+| new | old | old payload never drives SO, so no busy edge is seen; fixed delay after ~2 s of probing |
+| old | new | the old bridge does not read SO; fixed delay |
+
+The supported path is still to ship the payload, plugin zip and UF2 images
+together, since only the new payload produces the busy edge the probe looks for.
+
+`gbasend-lib/speed-test-gba/src/main.rs`, `nootloader/` and `xboo-rs` in
+gbasend-rs carry the same change.
 
 ## Flash
 
@@ -46,6 +79,10 @@ cargo build --release
 picotool uf2 convert target/thumbv6m-none-eabi/release/gbasend-pico \
   -t elf gbasend-pico.uf2
 ```
+
+The bundled images also need the SO flow-control working tree change on top of
+the commit above; a stock `a72da50` build does not read SO and will pace words
+with the fixed delay.
 
 ## License
 
