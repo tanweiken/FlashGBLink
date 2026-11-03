@@ -1,0 +1,37 @@
+name: release-notes
+
+# A release body is written when the tag is pushed. This keeps an already
+# published release in sync when its notes file changes afterwards.
+on:
+  push:
+    branches: ["main"]
+    paths: ["docs/releases/*.md"]
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Update the release body for each changed tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          changed=$(git diff --name-only "$BEFORE" "$AFTER" -- docs/releases || true)
+          for file in $changed; do
+            [ -f "$file" ] || continue
+            tag=$(basename "$file" .md)
+            if gh release view "$tag" >/dev/null 2>&1; then
+              gh release edit "$tag" --notes-file "$file"
+              echo "updated notes for $tag"
+            else
+              echo "no release for $tag; skipped"
+            fi
+          done
