@@ -390,6 +390,19 @@ What the sequence established:
 default for compatibility — with b2's CRC32 payload and everything learned since
 recorded here.
 
+Confirmed on hardware 2026-11-04: after reflashing the tight images, `0.3.0b5`
+measured **45 KiB/s** through FlashGBX, matching b2. The 37 KiB/s reported just
+before that was the same plugin running against a Pico still carrying the
+`b68a37d` wide-margin images, which makes the pairing rule in
+`firmware/README.md` a practical one, not a formality:
+
+| Firmware | Clock | Throughput, FlashGBX |
+|---|---|---|
+| tight `a1257e4` | 1.25 Mbaud | 42–45 KiB/s |
+| wide `b68a37d` | 1.25 Mbaud | ~37 KiB/s |
+| wide `b68a37d` | 1.8 Mbaud | 39–40 KiB/s |
+
+
 
 The 4 MiB write includes erase, program and verify, so it cannot be split from
 this run; verify alone accounts for a read's worth of the 133 s. FlashGBX's 2:22
