@@ -248,7 +248,9 @@ and a save that was never dumped is gone.
 
 ## How it works
 
-- **Pico firmware** (`gbasend-pico`) bridges USB serial to the GBA link port.
+- **Pico firmware** (`gbasend-pico`) bridges USB serial to the GBA link port and
+  paces each word by the GBA's SO line, so a transfer costs only as long as the
+  GBA's own work rather than a fixed per-word delay.
 - **Payload** (`payload/`) runs in GBA RAM after multiboot, performs 16-bit
   cartridge stores/loads, byte-wide save access, the progress bars and a soft
   reset, and holds the profile's write template. Before booting the cartridge it
@@ -284,10 +286,19 @@ and a save that was never dumped is gone.
   sequences, but other cartridge models have not yet been validated on real
   hardware. Detection alone does not guarantee that a cartridge is safe to
   write.
-Measured with a 4 MiB Apotris image on the tested cartridge: a verified full
-write took about **6–7 minutes**, a full read about **2.5 minutes**, and a 64 KiB
-SRAM backup/verified restore took **2.6 / 6.8 seconds**. Actual times depend on
-the cartridge and operation.
+Measured with a 4 MiB Apotris image on the tested cartridge after the SO
+flow-control change: a verified full write took **2:13** from the CLI and
+**2:22** through FlashGBX (was 6–7 minutes), a full read **45 s** (was about
+2.5 minutes), and 64 KiB SRAM backup/verified restore were not re-measured
+(2.6 / 6.8 seconds before). Actual times depend on the cartridge and operation.
+
+The bundled payload and Pico firmware pace each word by the GBA's SO line
+instead of a fixed delay, and the host no longer waits for the serial write to
+drain. That took the link from a fixed 150 µs per word to about 43 µs on this
+setup: 3.6× on reads and 2.7× on a full verified write. The handshake only
+engages at or above 1 Mbaud; slower sessions, the BIOS multiboot phase and an
+older payload all keep the fixed delay, so mixed installs stay safe. See
+`docs/hardware-baseline.md` for the measurements and how they were taken.
 
 ## Word protocol
 

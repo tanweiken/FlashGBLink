@@ -1002,10 +1002,12 @@ def main(argv=None):
                     cart_reset(link)
             print_cfi(info)
         elif args.command == "read":
-            count = (args.length + 3) // 4
-            words = link.read_words(args.address, count)
-            data = b"".join(struct.pack("<I", word) for word in words)
-            Path(args.output).write_bytes(data[:args.length])
+            # Clock in 4 KiB regions rather than one frame for the whole
+            # length: a multi-megabyte frame overruns the serial write buffer,
+            # times out mid-frame, and leaves the payload inside the read
+            # command waiting for words that never come.
+            data = read_region(link, args.address, args.length)
+            Path(args.output).write_bytes(data)
             print("wrote %d bytes to %s" % (args.length, args.output))
         elif args.command == "save":
             data = save_dump(link, args.output, args.size)

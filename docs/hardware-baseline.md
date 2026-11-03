@@ -184,3 +184,93 @@ multiboot stream (`0x00FF94EF`, then `0xFFFFFFFF`) instead of a payload status.
 quietly and retries discovery once.  After that the first Connect succeeds
 without a manual reconnect.  The plugin writes these events to
 `<FlashGBX config>/flashgblink.log`.
+
+## SO flow control (measured 2026-11-03)
+
+Recorded 2026-11-03. The bridge no longer paces words with a fixed delay. The
+payload raises SIO SO while it is busy and drops it once the next reply is in
+the data register; the Pico waits for SO low before clocking each word, with a
+2 µs arm and 5 µs settle.
+
+| Item | New |
+|---|---|
+| Bridge | `firmware/gbasend-pico.uf2` / `-rgb.uf2`, gbasend-rs `a72da50` plus the flow-control change |
+| Payload | `payload/flasher.gba`, 5456 bytes, sha256 `7fccb2b6fdf4f769717c89f6ca63df59a02d52c0f94ef5e748b177b093f84d45` |
+| Host | `Link.xfer` no longer calls `ser.flush()` per exchange |
+
+The payload change is a handful of register writes per word: assert SO with
+start clear, load `SIODATA32`, drop SO for the ready window, set start, then
+assert SO again once the word is in. The first build of the change was 6048
+bytes because it did a read-modify-write of the volatile control register; a
+whole-word write each time brings it to 5456 bytes with arm-none-eabi-gcc 15.2.1
+(Arm GNU Toolchain 15.2.rel1). The same sources without the change build to 5136
+bytes with that toolchain; the 5120-byte image this project shipped before was
+built with an older one.
+
+### Measured
+
+Same cartridge, same Pico, `gbasend-pico.uf2` with the handshake, payload above,
+`flash.py` at 1.25 Mbaud. Wall clock, one run each:
+
+| Operation | Baseline | Now | Change |
+|---|---|---|---|
+| multiboot upload | 1.5 s | 1.8 s | unchanged (BIOS pacing, plus process start) |
+| `read` 512 bytes | ~2 s | 0.07 s | ~28× |
+| 4 MiB read (64 KiB commands) | 160.2 s (plugin) | 45.1 s | **3.6×**, 90.8 KiB/s |
+| 4 MiB `image --full --boot` | 6:03 (363 s, CLI) | 2:13 (133 s) | **2.7×**, verified |
+| 4 MiB full write (plugin) | 404 s | 2:22 (142 s) | **2.8×**, verified |
+
+The read rate is 43 µs per word: 25.6 µs of clock at 1.25 Mbaud, 7 µs of bridge
+arm and settle, and the rest payload work and USB framing. The 156 KiB/s clock
+ceiling is therefore still 1.7× away, which is what the later phases (fewer
+round trips, double buffering, a faster clock) would recover.
+
+The 4 MiB write includes erase, program and verify, so it cannot be split from
+this run; verify alone accounts for a read's worth of the 133 s. FlashGBX's 2:22
+is its own elapsed-time readout for the same operation and within 7% of the CLI,
+even though the plugin hands the payload 1 KiB chunks where the CLI uses 64 KiB.
+
+One host-side limit surfaced while measuring: `flash.py read` builds a single
+frame for the whole length, so a multi-megabyte read fills the serial write
+buffer, times out, and leaves the payload inside the read command. `read` now
+clocks in 4 KiB regions like the plugin; recovering an already-wedged session
+means clocking out the outstanding words, or power-cycling the GBA.
+
+### What to check first
+
+1. Flash the new UF2, then `flash.py upload` and `flash.py id`; a wrong SO
+   ordering shows up here as a timeout or a shifted reply rather than silent
+   corruption. The upload runs at 256 kHz, below the 1 Mbaud probe threshold, so
+   this step must behave exactly as before the change.
+2. `flash.py cfi`, a 512-byte `read`, then a 64 KiB save dump and its verified
+   restore.
+3. One full-density sector (erase, 128 KiB program, verify).
+4. `flash.py image Apotris.gba --full --boot`, then a FlashGBX write through the
+   plugin.
+5. If timings do not move, the handshake is not engaging: check SO on GP0 with a
+   logic analyzer, and confirm the GBA runs this payload rather than a cached
+   copy. The probe needs to catch the busy edge, which for a ping is only a few
+   hundred nanoseconds wide — a missed edge costs the speedup, not correctness.
+
+### Probe limits
+
+The probe starts off, only runs at or above 1 Mbaud, and only locks on after
+seeing SO go high following a word:
+
+| Situation | SO behaviour | Probe outcome |
+|---|---|---|
+| New payload, idle or with a word loaded | high while busy, low when ready | busy edge seen, engages |
+| New payload with the old bridge | the old bridge does not read SO | fixed delay, works |
+| Old payload (never drives SO) | low, permanently | no busy edge, fixed delay after ~2 s |
+| BIOS multiboot | SO is the reply data line | never probed: below 1 Mbaud |
+
+A payload session opened below 1 Mbaud keeps the fixed delay; that is the only
+cost of the guard. The previous images are in this repository's history:
+
+```sh
+git log --oneline -- firmware/gbasend-pico.uf2   # commit before the change
+git show <commit>:firmware/gbasend-pico.uf2 > gbasend-pico-old.uf2
+```
+
+The old payload/bridge pair still works (fixed delay), so a regression here is
+a rollback of the two UF2 files, not a lost cartridge.
