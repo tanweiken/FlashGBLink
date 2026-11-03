@@ -1045,7 +1045,7 @@ def main(argv=None):
     # a value already given before the subcommand; fill the defaults here.
     defaults = {
         "port": None,
-        "baud": 1_800_000,
+        "baud": 1_250_000,
         "upload_baud": 256_000,
         "gbasend": "gbasend",
         "payload": str(PAYLOAD),

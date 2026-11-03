@@ -2,10 +2,16 @@
 
 Prebuilt RP2040 UF2 images built from
 [tanweiken/gbasend-rs](https://github.com/tanweiken/gbasend-rs) commit
-`b68a37d` (2026-11-04), a fork of
-[nullstalgia/gbasend-rs](https://github.com/nullstalgia/gbasend-rs) (base
-`a72da50`, upstream `main` merged in `c169302`) that adds the SO ready-line
-handshake described below.
+`a1257e4` (2026-11-03), a fork of
+[nullstalgia/gbasend-rs](https://github.com/nullstalgia/gbasend-rs) at `a72da50`
+that adds the SO ready-line handshake described below.
+
+These are the **tight-margin** images (2 µs arm / 5 µs settle): the fastest
+build measured on this hardware at the default 1.25 Mbaud. The fork's later
+`b68a37d` build widens the margins to 5 µs / 20 µs so the handshake holds above
+1.25 Mbaud; it is reliable there but slower per word, so it is not the image
+shipped here. Use it only if you need a clock above 1.25 Mbaud for some other
+reason.
 
 | File | Use |
 |---|---|
@@ -15,8 +21,8 @@ handshake described below.
 SHA-256:
 
 ```
-86f7cd566c12bdf440f2d55f9a99acb4171e1d083235633f24aad40846ce2083  gbasend-pico.uf2
-26aaec90cd552de2d0fc93cbfe2bfee694c339d4d6b9346f85879bf3e7d40a6c  gbasend-pico-rgb.uf2
+d3d7021e1efec7f5c68a17b55cb2b8cb160a12fd37574f12c3578b782d99edc1  gbasend-pico.uf2
+c2ab26077989698dd103d683d10fd4310f1377880039e8c8e41ea6acd061cbb6  gbasend-pico-rgb.uf2
 ```
 
 Both images report family `Raspberry Pi RP2040` (UF2 family ID `0xe48bff56`).
@@ -27,17 +33,19 @@ They do not run on RP2350 boards (Pico 2, RP2350-LCD-1.47) or ESP32.
 Each word used to cost a fixed delay because the bridge could not tell whether
 the GBA had loaded its next reply. The GBA's payload now drives the SIO SO line
 high while it is busy and low once the reply is in the data register, and the
-bridge waits for SO low before clocking (5 µs arm, 20 µs settle). A transfer
+bridge waits for SO low before clocking (2 µs arm, 5 µs settle). A transfer
 therefore costs as long as the GBA's own work plus 32 clocks, instead of a
 fixed 150 µs per word.
 
-The margins started at 2 µs and 5 µs. On hardware the handshake then failed
-above about 900 kHz with data mismatches once the clock reached the payload's
-own processing time, so `b68a37d` widened them to 5 µs and 20 µs; the same speed
-test then ran clean at 1.0, 1.5 and 1.8 Mbaud (9,727 / 10,831 / 11,071 words per
-second) and only broke at 1.9 Mbaud. The wider settle costs about 18 µs per word
-at a given clock, so the clock is now the lever: raise `--baud` rather than
-expect the old 1.25 Mbaud timing.
+The margins are the whole trade-off. At 2 µs / 5 µs the bridge keeps up with a
+payload that raises SO within a couple of instructions of the last clock — the
+FlashGBLink payload does — and the word costs about 43 µs at 1.25 Mbaud. A
+heavier per-word handler, such as the gbasend speed-test ROM, mismatches above
+about 900 kHz with these margins; `b68a37d` widens them to 5 µs / 20 µs, which
+runs the speed test clean at 1.0–1.8 Mbaud but costs about 13 µs per word. Since
+1.8 Mbaud only recovers about 6 µs of that, the wide build is slower end to end
+(39–40 KiB/s against 42–45 KiB/s through FlashGBX), and 0.3.0b5 ships the tight
+one at 1.25 Mbaud. See `docs/hardware-baseline.md` for the measurements.
 
 The bridge starts with the original fixed delay and only probes for the
 handshake at or above 1 Mbaud, so the BIOS multiboot phase — which uses SO as its
@@ -84,7 +92,7 @@ same time.
 
 ```sh
 git clone https://github.com/tanweiken/gbasend-rs
-git -C gbasend-rs checkout b68a37d
+git -C gbasend-rs checkout a1257e4
 cd gbasend-rs/gbasend-pico
 cargo build --release
 picotool uf2 convert target/thumbv6m-none-eabi/release/gbasend-pico \
@@ -92,7 +100,8 @@ picotool uf2 convert target/thumbv6m-none-eabi/release/gbasend-pico \
 ```
 
 Upstream `nullstalgia/gbasend-rs` at `a72da50` does not read SO and paces every
-word with the fixed delay, so it will not reproduce these images.
+word with the fixed delay, so it will not reproduce these images. Checking out
+`b68a37d` instead builds the wide-margin 5 µs / 20 µs images.
 
 ## License
 

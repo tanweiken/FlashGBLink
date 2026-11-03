@@ -15,7 +15,7 @@ devices. A small payload boots into GBA RAM over the BIOS multiboot link, then
 bridges the Pico to the cartridge. During a write, the console shows live green
 write and cyan verification progress, then a completion screen.
 
-> **Experimental performance branch (plugin `0.3.0b3`).** This line paces the
+> **Experimental performance branch (plugin `0.3.0b5`).** This line paces the
 > link port by the GBA's SO ready line instead of a fixed per-word delay, and
 > carries the CRC32 delta work from `main` 0.2.3. On the tested 32 MiB
 > cartridge it reads 3.6× faster and does a verified 4 MiB write 2.7–2.8×
@@ -23,10 +23,10 @@ write and cyan verification progress, then a completion screen.
 > [`docs/hardware-baseline.md`](docs/hardware-baseline.md)); the CRC32 diff and
 > verify remove the ROM read-back on top of that. It needs the matching
 > `gbasend` from
-> [tanweiken/gbasend-rs](https://github.com/tanweiken/gbasend-rs) commit
-> `b68a37d`, and the UF2 images in `firmware/` are built from that commit —
-> payload, plugin and firmware must come from this branch together. `main`
-> stays on the 0.2.3 release for the upstream-compatible setup.
+> [tanweiken/gbasend-rs](https://github.com/tanweiken/gbasend-rs), and the UF2
+> images in `firmware/` are built from the fork's tight-margin commit
+> `a1257e4`; payload, plugin and firmware must come from this branch together.
+> `main` stays on the 0.2.3 release for the upstream-compatible setup.
 
 ## Credits
 
@@ -248,9 +248,9 @@ $PY flash.py image Apotris.gba --boot
 - Each changed sector is erased, programmed in 4 KiB blocks using the profile's
   buffered-write template, and verified.
 
-Options: `--port`, `--baud` (data phase SPI clock; 1.8 MHz in 0.3.0b4,
-which measured slower than 1.25 MHz, so pass `--baud 1250000` until 0.3.0b5
-restores it as the default),
+Options: `--port`, `--baud` (data phase SPI clock, default 1.25 MHz; higher
+clocks need the wide-margin firmware described in `firmware/README.md` and are
+slower end to end on the tested hardware),
 `--upload-baud` (multiboot clock, default 256 kHz), `--config` (profile
 directory; default: autodetect FlashGBX's), `--profile` (profile name,
 skips autodetection), `--state` (delta state file),
@@ -332,17 +332,15 @@ and operation.
 The bundled payload and Pico firmware pace each word by the GBA's SO line
 instead of a fixed delay, and the host no longer waits for the serial write to
 drain. That took the link from a fixed 150 µs per word to about 43 µs on this
-setup: 3.6× on reads and 2.7× on a full verified write, measured at 1.25 Mbaud
-with the 2 µs / 5 µs handshake margins. Those margins also ran the payload at
-1.25 Mbaud through every end-to-end run recorded here; they are the fastest
-configuration measured and the one `0.3.0b5` returns to.
+setup: 3.6× on reads and 2.7× on a full verified write at 1.25 Mbaud with the
+2 µs / 5 µs handshake margins, which is what `0.3.0b5` ships.
 
-The wider 5 µs / 20 µs margins in `0.3.0b3` and the 1.8 Mbaud default in
-`0.3.0b4` were an attempt to trade some of that per-word cost for a higher
-clock. It does not pay on this hardware: through FlashGBX, 1.8 Mbaud with the
-wide margins measured 39–40 KiB/s against 42–45 KiB/s for 1.25 Mbaud with the
-narrow ones, because the settle costs more per word than the clock recovers. Use
-1.25 Mbaud; see `docs/hardware-baseline.md` for the numbers. The handshake only
+`0.3.0b3` and `0.3.0b4` went the other way — wider 5 µs / 20 µs margins so the
+handshake also held at 1.8 Mbaud — and were slower: through FlashGBX, 39–40
+KiB/s against 42–45 KiB/s, because the settle costs about 13 µs per word and the
+higher clock only recovers about 6. Both builds are still available for anyone
+who needs a clock above 1.25 Mbaud, but 1.25 Mbaud with the tight margins is the
+default and the fastest option on the tested hardware. The handshake only
 engages at or above 1 Mbaud, and slower sessions, the BIOS multiboot phase and an
 older payload all keep the fixed delay, so mixed installs stay safe.
 

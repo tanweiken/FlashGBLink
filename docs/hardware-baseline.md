@@ -359,6 +359,38 @@ so the tighter margins held at 1.25 Mbaud through every run recorded here — bu
 1.25 Mbaud is the ceiling they are known to be safe at, and `0.3.0b5` does not
 raise the default.
 
+### Timing timeline, b1 to b5
+
+| Build | Firmware | Margins | Default clock | Result |
+|---|---|---|---|---|
+| `0.3.0b1` | `a1257e4` | 2 µs / 5 µs | 1.25 Mbaud | SO pacing lands: 4 MiB read 45.1 s, write 2:13 CLI / 2:22 FlashGBX |
+| `0.3.0b2` | `a1257e4` | 2 µs / 5 µs | 1.25 Mbaud | Adds the CRC32 payload; timing unchanged, 42–45 KiB/s through FlashGBX |
+| `0.3.0b3` | `b68a37d` | 5 µs / 20 µs | 1.25 Mbaud | Handshake clean to 1.8 Mbaud, but 58.4 s at 1.25 Mbaud: the settle costs 13 µs per word |
+| `0.3.0b4` | `b68a37d` | 5 µs / 20 µs | 1.8 Mbaud | 52.1 s from the CLI, yet 39–40 KiB/s through FlashGBX — slower than b2 |
+| `0.3.0b5` | `a1257e4` | 2 µs / 5 µs | 1.25 Mbaud | b2's timing restored, plus the CRC32 payload and the doc corrections |
+
+What the sequence established:
+
+1. **The fixed delay was the bottleneck.** Removing it took a word from 150 µs
+   to ~43 µs: 3.6× on reads, 2.7× on a verified write.
+2. **Margins are a payload property, clock headroom is a link property.** The
+   bridge must wait long enough for the payload to raise SO after the last
+   clock. Our payload does that in ~1 µs, so 5 µs is ample; 1.25 Mbaud then
+   leaves 34% headroom under the 1.9 Mbaud mismatch point.
+3. **A higher clock cannot repay a wider settle here.** At this per-word cost
+   the clock is a minority of the time, so 1.8 Mbaud returns ~6 µs of the ~13 µs
+   a wider settle costs. That is why b4 lost to b2 despite the CLI numbers
+   looking better in isolation.
+4. **The wide-margin build is a fallback, not a default.** It is the one to use
+   if a payload or a setup needs a clock above 1.25 Mbaud (heavy per-word
+   handler, or a future change that slows the reply path); it should be expected
+   to be slower at 1.25 Mbaud.
+
+`0.3.0b5` therefore ships b2's timing — the measured fastest and the best
+default for compatibility — with b2's CRC32 payload and everything learned since
+recorded here.
+
+
 The 4 MiB write includes erase, program and verify, so it cannot be split from
 this run; verify alone accounts for a read's worth of the 133 s. FlashGBX's 2:22
 is its own elapsed-time readout for the same operation and within 7% of the CLI,
