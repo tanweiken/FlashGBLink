@@ -248,7 +248,8 @@ $PY flash.py image Apotris.gba --boot
 - Each changed sector is erased, programmed in 4 KiB blocks using the profile's
   buffered-write template, and verified.
 
-Options: `--port`, `--baud` (data phase SPI clock, default 1.25 MHz),
+Options: `--port`, `--baud` (data phase SPI clock, default 1.8 MHz;
+drop to `--baud 1250000` if a setup is unstable at that clock),
 `--upload-baud` (multiboot clock, default 256 kHz), `--config` (profile
 directory; default: autodetect FlashGBX's), `--profile` (profile name,
 skips autodetection), `--state` (delta state file),
@@ -331,13 +332,13 @@ The bundled payload and Pico firmware pace each word by the GBA's SO line
 instead of a fixed delay, and the host no longer waits for the serial write to
 drain. That took the link from a fixed 150 µs per word to about 43 µs on this
 setup: 3.6× on reads and 2.7× on a full verified write, measured at 1.25 Mbaud
-with the first handshake margins. `0.3.0b3` widens those margins by about 13 µs
-per word so the handshake stays clean to 1.8 Mbaud, where the extra clock gives
-back roughly half of it: at `--baud 1800000` the 4 MiB read takes **52 s** and a
-full `--full --boot` write **1:54** (3.1× and 3.2× the 0.2.2 baseline). The
-handshake only engages at or above 1 Mbaud; slower sessions, the BIOS multiboot
-phase and an older payload all keep the fixed delay, so mixed installs stay
-safe. See `docs/hardware-baseline.md` for the measurements.
+with the first handshake margins. The wider 5 µs / 20 µs margins in `0.3.0b3`
+cost about 13 µs per word but keep the handshake clean at higher clocks, and
+`0.3.0b4` makes 1.8 Mbaud the default: the 4 MiB read takes **52 s** and a full
+`--full --boot` write **1:54**, 3.1× and 3.2× the 0.2.2 baseline. The handshake
+only engages at or above 1 Mbaud; slower sessions, the BIOS multiboot phase and
+an older payload all keep the fixed delay, so mixed installs stay safe. See
+`docs/hardware-baseline.md` for the measurements.
 
 This line also carries the payload CRC32 delta work: a repeat write of an
 unchanged image is a probe of every sector (~1 s), a cold diff compares one CRC

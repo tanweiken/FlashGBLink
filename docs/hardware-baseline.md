@@ -328,6 +328,8 @@ verify, against 2:13 at 1.25 Mbaud with the old read-back verify and 6:03 in the
 The wider margins cost about 13 µs per word against the 2 µs / 5 µs build
 (55.7 µs vs 43 µs at 1.25 Mbaud), and 1.8 Mbaud gives back roughly half of that
 (49.7 µs). 1.8 Mbaud is the fastest clean setting measured; 1.9 Mbaud is not.
+`0.3.0b4` makes 1.8 Mbaud the default for `flash.py` and the plugin; a lower
+FlashGBX baud setting, or `flash.py --baud 1250000`, clamps it back down.
 
 The 4 MiB write includes erase, program and verify, so it cannot be split from
 this run; verify alone accounts for a read's worth of the 133 s. FlashGBX's 2:22
