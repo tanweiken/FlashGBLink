@@ -259,6 +259,10 @@ skips autodetection), `--state` (delta state file),
 
 ### Apotris development
 
+> **Archived.** The Apotris helper now lives on `main` as
+> [`examples/apotris`](https://github.com/tanweiken/FlashGBLink/tree/main/examples/apotris).
+> This branch is kept for its history and is no longer maintained.
+
 For the bootleg `M36L0R8060B` cartridge used for Apotris development, the
 profile is fixed, so `scripts/apotris.sh` skips autodetection and flashes the
 current build:
