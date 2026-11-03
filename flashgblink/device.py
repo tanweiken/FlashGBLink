@@ -34,10 +34,9 @@ class GbxDevice(LK_Device):
     DEVICE_MAX_FW = 15
     DEVICE_LATEST_FW_TS = {}
     PCB_VERSIONS = {1: ""}
-    # 1.8 Mbaud is the fastest clock measured clean with the widened SO
-    # margins (1.9 mismatches on the test hardware). FlashGBX's own baud
-    # setting clamps this down, so 1.25 Mbaud is still one setting away.
-    BAUDRATE = 1_800_000
+    # 1.25 Mbaud with the tight 2 us / 5 us margins is the fastest measured
+    # configuration; 1.8 Mbaud with the wide margins is slower end to end.
+    BAUDRATE = 1_250_000
     MAX_BUFFER_READ = BLOCK_BYTES
     MAX_BUFFER_WRITE = BLOCK_BYTES
     USB_IDS = ((0x2E8A, 0x000A),)
