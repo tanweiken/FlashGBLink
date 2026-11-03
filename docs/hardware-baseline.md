@@ -308,6 +308,27 @@ widened margins the speed test ran at 9,727 / 10,831 / 11,071 words per second a
 is the setting to measure next — the speed-test ROM's own per-word work is the
 floor there, not the link.
 
+### Wider margins at 1.8 Mbaud
+
+Measured 2026-11-04 with `b68a37d`, same cartridge, payload and 64 KiB read
+commands:
+
+| Clock | 4 MiB read | Rate | Per word |
+|---|---|---|---|
+| 1.25 Mbaud | 58.4 s | 70.1 KiB/s | 55.7 µs |
+| 1.5 Mbaud | 54.2 s | 75.6 KiB/s | 51.7 µs |
+| 1.8 Mbaud | 52.1 s | 78.6 KiB/s | 49.7 µs |
+
+All three reads returned the same sha256, so 1.8 Mbaud is clean here; the speed
+test's first mismatch is at 1.9 Mbaud. A full `image --full --boot` of the same
+4 MiB Apotris image at 1.8 Mbaud took **1:54** wall clock with the payload's CRC
+verify, against 2:13 at 1.25 Mbaud with the old read-back verify and 6:03 in the
+0.2.2 baseline.
+
+The wider margins cost about 13 µs per word against the 2 µs / 5 µs build
+(55.7 µs vs 43 µs at 1.25 Mbaud), and 1.8 Mbaud gives back roughly half of that
+(49.7 µs). 1.8 Mbaud is the fastest clean setting measured; 1.9 Mbaud is not.
+
 The 4 MiB write includes erase, program and verify, so it cannot be split from
 this run; verify alone accounts for a read's worth of the 133 s. FlashGBX's 2:22
 is its own elapsed-time readout for the same operation and within 7% of the CLI,
