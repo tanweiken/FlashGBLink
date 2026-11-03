@@ -13,7 +13,7 @@ PLUGIN_NAME = "FlashGBLink"
 PLUGIN_DESCRIPTION = (
     "Read and write GBA cartridges through the GBA link port and an "
     "RP2040 Pico running the gbasend firmware with the flasher payload.")
-PLUGIN_VERSION = "0.2.2"
+PLUGIN_VERSION = "0.3.0b1"
 
 _ROOT = os.environ.get("FLASHGBLINK_ROOT") or os.path.dirname(
     os.path.abspath(__file__))
