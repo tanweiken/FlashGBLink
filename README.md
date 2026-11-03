@@ -24,7 +24,7 @@ write and cyan verification progress, then a completion screen.
 > verify remove the ROM read-back on top of that. It needs the matching
 > `gbasend` from
 > [tanweiken/gbasend-rs](https://github.com/tanweiken/gbasend-rs) commit
-> `a1257e4`, and the UF2 images in `firmware/` are built from that commit —
+> `b68a37d`, and the UF2 images in `firmware/` are built from that commit —
 > payload, plugin and firmware must come from this branch together. `main`
 > stays on the 0.2.3 release for the upstream-compatible setup.
 
@@ -45,7 +45,7 @@ there would be no link and no cartridge knowledge:
   upload protocol and the `gbasend` CLI. The prebuilt UF2s in `firmware/` are
   built from
   [tanweiken/gbasend-rs](https://github.com/tanweiken/gbasend-rs) commit
-  `a1257e4`, a fork of that project which adds the SO ready-line handshake. The
+  `b68a37d`, a fork of that project which adds the SO ready-line handshake. The
   entire Pico/link/upload layer is theirs.
 
 This project adds the GBA-side payload (16-bit and byte-wide cartridge access,
@@ -99,7 +99,7 @@ VCC.** Wiring: Pico GP0 → GBA SO, GP2 → GBA SC, GP3 → GBA SI, and GND, wit
 
    ```sh
    git clone https://github.com/tanweiken/gbasend-rs
-   git -C gbasend-rs checkout a1257e4
+   git -C gbasend-rs checkout b68a37d
    cargo build --release --manifest-path gbasend-rs/gbasend-cli/Cargo.toml
    GBASEND="$PWD/gbasend-rs/gbasend-cli/target/release/gbasend"
    ```
@@ -338,10 +338,13 @@ and operation.
 The bundled payload and Pico firmware pace each word by the GBA's SO line
 instead of a fixed delay, and the host no longer waits for the serial write to
 drain. That took the link from a fixed 150 µs per word to about 43 µs on this
-setup: 3.6× on reads and 2.7× on a full verified write. The handshake only
-engages at or above 1 Mbaud; slower sessions, the BIOS multiboot phase and an
-older payload all keep the fixed delay, so mixed installs stay safe. See
-`docs/hardware-baseline.md` for the measurements and how they were taken.
+setup: 3.6× on reads and 2.7× on a full verified write, measured at 1.25 Mbaud
+with the first handshake margins. `0.3.0b3` widens those margins by about 18 µs
+per word so the handshake survives 1.5–1.8 Mbaud, where the extra clock speed
+more than pays it back; the end-to-end numbers have not been re-timed at that
+clock. The handshake only engages at or above 1 Mbaud; slower sessions, the BIOS
+multiboot phase and an older payload all keep the fixed delay, so mixed installs
+stay safe. See `docs/hardware-baseline.md` for the measurements.
 
 This line also carries the payload CRC32 delta work: a repeat write of an
 unchanged image is a probe of every sector (~1 s), a cold diff compares one CRC

@@ -258,7 +258,9 @@ without a manual reconnect.  The plugin writes these events to
 Recorded 2026-11-03. The bridge no longer paces words with a fixed delay. The
 payload raises SIO SO while it is busy and drops it once the next reply is in
 the data register; the Pico waits for SO low before clocking each word, with a
-2 µs arm and 5 µs settle.
+5 µs arm and 20 µs settle. Those margins were 2 µs and 5 µs when the numbers
+below were taken: on hardware that build mismatched above roughly 900 kHz, so
+`b68a37d` widened them and the same speed test then ran clean to 1.8 Mbaud.
 
 | Item | New |
 |---|---|
@@ -282,8 +284,8 @@ built with an older one.
 
 ### Measured
 
-Same cartridge, same Pico, `gbasend-pico.uf2` with the handshake, payload above,
-`flash.py` at 1.25 Mbaud. Wall clock, one run each:
+Same cartridge, same Pico, `gbasend-pico.uf2` with the handshake and the 2 µs /
+5 µs margins, payload above, `flash.py` at 1.25 Mbaud. Wall clock, one run each:
 
 | Operation | Baseline | Now | Change |
 |---|---|---|---|
@@ -297,6 +299,14 @@ The read rate is 43 µs per word: 25.6 µs of clock at 1.25 Mbaud, 7 µs of brid
 arm and settle, and the rest payload work and USB framing. The 156 KiB/s clock
 ceiling is therefore still 1.7× away, which is what the later phases (fewer
 round trips, double buffering, a faster clock) would recover.
+
+The 5 µs / 20 µs margins cost about 18 µs more per word than the 2 µs / 5 µs
+ones these numbers were taken with, so at a fixed 1.25 Mbaud the 4 MiB read
+should land near 61 µs per word (~65 KiB/s) until the clock is raised. With the
+widened margins the speed test ran at 9,727 / 10,831 / 11,071 words per second at
+1.0 / 1.5 / 1.8 Mbaud and failed at 1.9, so `--baud` in the 1.5–1.8 Mbaud range
+is the setting to measure next — the speed-test ROM's own per-word work is the
+floor there, not the link.
 
 The 4 MiB write includes erase, program and verify, so it cannot be split from
 this run; verify alone accounts for a read's worth of the 133 s. FlashGBX's 2:22
