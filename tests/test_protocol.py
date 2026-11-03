@@ -179,3 +179,20 @@ class SaveTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReadRegionTests(unittest.TestCase):
+    def test_long_reads_are_split_into_link_sized_commands(self):
+        calls = []
+
+        class Cart:
+            def read_words(self, address, count):
+                calls.append((address, count))
+                return [0] * count
+
+        data = flash.read_region(Cart(), 0x1000, 0x3000)
+        self.assertEqual(len(data), 0x3000)
+        self.assertEqual([count for _address, count in calls],
+                         [1024, 1024, 1024])
+        self.assertEqual([address for address, _count in calls],
+                         [0x1000, 0x2000, 0x3000])

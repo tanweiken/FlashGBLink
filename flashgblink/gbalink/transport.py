@@ -11,7 +11,7 @@ import threading
 import time
 from pathlib import Path
 
-from .errors import ProtocolError, TransferError
+from .errors import ProtocolError, TransferError, UnsupportedCommand
 
 GBASEND_VID = 0x2E8A
 GBASEND_PID = 0x000A
@@ -28,8 +28,11 @@ OP_READ8 = 0x70
 OP_WRITE8 = 0x80
 OP_SET_PLAN = 0x90
 OP_DONE = 0xA0
+OP_CRC32 = 0xB0
+OP_CRC_GET = 0xB1
 
 ST_OK = 0xA5A50000
+ST_ECHO = 0xA5A5E000
 ST_BAD = 0xA5A500E1
 
 # A desynced transfer is recovered by clocking dummy words at the payload:
@@ -43,6 +46,15 @@ PAYLOAD = PACKAGE_DIR / "payload" / "flasher.gba"
 if not PAYLOAD.is_file():
     PAYLOAD = PACKAGE_DIR.parent / "payload" / "flasher.gba"
 BLOCK_BYTES = 4096
+# Measured on the M36: a payload CRC job runs at roughly 220 KB/s, and the
+# stock Pico firmware byte-shifts its reply stream if it is pinged faster than
+# it can drain, so the host waits out most of a job before polling.
+CRC_SECONDS_PER_BYTE = 4.5e-6
+CRC_POLL_INTERVAL = 0.02
+# The screen draw can take a few hundred milliseconds (VRAM is only freely
+# writable during blanking), so the confirmation is polled at this interval
+# instead of in a tight loop; a ping flood byte-shifts the Pico's reply stream.
+DRAW_POLL_INTERVAL = 0.02
 
 
 def _require_serial():
@@ -254,6 +266,59 @@ class Link:
         _check_status(replies[-1])
         return replies[3:3 + count]
 
+    def crc32(self, address, length, timeout=10.0):
+        """CRC32 of cartridge bytes, computed by the payload.
+
+        The job is started with a three-word header and the result is fetched
+        by a second command, because the Pico clocks the link at a fixed pace:
+        a reply that waited for a whole sector to be CRC'd would be clocked
+        into the wrong word. The host waits out most of the compute, then polls
+        slowly, and resynchronises once if the job stalls.
+        """
+        try:
+            return self._crc32_job(address, length, timeout)
+        except UnsupportedCommand:
+            raise
+        except ProtocolError:
+            # A stalled or out-of-frame job leaves the payload waiting for a
+            # clock; drain it and try once more before giving up.
+            if not self.resync(attempts=8):
+                raise
+            return self._crc32_job(address, length, timeout)
+
+    def _crc32_job(self, address, length, timeout):
+        frame = [(HDR_MAGIC << 24) | (OP_CRC32 << 8), address & 0xFFFFFFFF,
+                 length & 0xFFFFFFFF]
+        replies = self.xfer_with_recovery(frame, timeout=timeout)
+        if replies[1] == ST_BAD:
+            raise UnsupportedCommand(
+                "the running payload has no CRC32 command; re-upload "
+                "payload/flasher.gba")
+        if ((replies[1] & 0xFFFFFF00) != ST_ECHO
+                or (replies[2] & 0xFFFFFF00) != ST_ECHO):
+            raise ProtocolError("the CRC32 command was answered out of frame")
+
+        started = time.monotonic()
+        time.sleep(min(5.0, length * CRC_SECONDS_PER_BYTE))
+        deadline = started + timeout
+        while True:
+            try:
+                status = self.ping(timeout=0.05)
+            except ProtocolError:
+                status = None
+            if status is not None and (status & 0xFFFFFF00) == ST_OK:
+                break
+            if status == ST_BAD:
+                raise ProtocolError("the payload rejected the CRC32 job")
+            if time.monotonic() >= deadline:
+                raise ProtocolError(
+                    "CRC32 job at 0x%X did not finish" % address)
+            time.sleep(CRC_POLL_INTERVAL)
+        replies = self.xfer_with_recovery(
+            [(HDR_MAGIC << 24) | (OP_CRC_GET << 8), 0xFFFFFFFF],
+            timeout=timeout)
+        return replies[1]
+
     def read8(self, address, count, timeout=10.0):
         words = (count + 3) // 4
         frame = [(HDR_MAGIC << 24) | (OP_READ8 << 8), address & 0xFFFFFFFF,
@@ -305,8 +370,23 @@ def read_region(link, address, length):
     for offset in range(0, length, BLOCK_BYTES):
         size = min(BLOCK_BYTES, length - offset)
         words = link.read_words(address + offset, (size + 3) // 4)
-        out += b"".join(struct.pack("<I", word) for word in words)[:size]
+        out += struct.pack("<%dI" % len(words), *words)[:size]
     return bytes(out)
+
+
+def _await_draw(link, what, timeout):
+    """Poll for the ST_OK that follows a drawing command, slowly."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            status = link.ping(timeout=0.2)
+        except ProtocolError:
+            status = None
+        if status is not None and (status & 0xFFFFFF00) == ST_OK:
+            return
+        if time.monotonic() >= deadline:
+            raise ProtocolError("%s was not acknowledged" % what)
+        time.sleep(DRAW_POLL_INTERVAL)
 
 
 def progress(link, percent, phase=0, timeout=2.0):
@@ -321,34 +401,16 @@ def progress(link, percent, phase=0, timeout=2.0):
     header = ((HDR_MAGIC << 24) | ((int(phase) & 0xFF) << 16)
               | (OP_PROGRESS << 8) | percent)
     link.xfer_with_recovery([header, PING])
-    # The payload spends a couple of milliseconds drawing before it preloads
-    # its reply; pinging into that window would burn a full timeout.
-    time.sleep(0.01)
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            status = link.ping(timeout=0.5)
-        except ProtocolError:
-            continue
-        if (status & 0xFFFFFF00) == ST_OK:
-            return
-    raise ProtocolError("progress update %d%% was not acknowledged" % percent)
+    time.sleep(DRAW_POLL_INTERVAL)
+    _await_draw(link, "progress update %d%%" % percent, timeout)
 
 
 def done(link, timeout=2.0):
     """Show the completion message on the GBA."""
     header = (HDR_MAGIC << 24) | (OP_DONE << 8)
     link.xfer_with_recovery([header, PING])
-    time.sleep(0.01)
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            status = link.ping(timeout=0.5)
-        except ProtocolError:
-            continue
-        if (status & 0xFFFFFF00) == ST_OK:
-            return
-    raise ProtocolError("completion message was not acknowledged")
+    time.sleep(DRAW_POLL_INTERVAL)
+    _await_draw(link, "completion message", timeout)
 
 
 def write_block(link, address, data, timeout=30.0):

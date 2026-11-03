@@ -233,6 +233,31 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(self.device._write(bytearray(b"\xAA\xBB"), wait=True), 1)
         self.assertEqual(self.device.LINK.saved[0x10:0x12], b"\xAA\xBB")
 
+    def test_calc_crc32_covers_the_sector_and_replies_big_endian(self):
+        import zlib
+        command = self.device.DEVICE_CMD
+        self.device._set_fw_variable("ADDRESS", 0x10)   # word address
+        self.device._write(bytearray([command["CALC_CRC32"]]))
+        self.device._write(bytearray(b"\x00\x00\x00\x20"))
+        expected = zlib.crc32(bytes(self.device.LINK.rom[0x20:0x40])) & 0xFFFFFFFF
+        self.assertEqual(self.device._read(4),
+                         bytearray(expected.to_bytes(4, "big")))
+
+    def test_calc_crc32_keeps_a_write_going_without_payload_support(self):
+        command = self.device.DEVICE_CMD
+
+        def unsupported(*args, **kwargs):
+            raise self.device_module.ProtocolError("no CRC32 in this payload")
+
+        original = self.device.LINK.crc32
+        self.device.LINK.crc32 = unsupported
+        try:
+            self.device._write(bytearray([command["CALC_CRC32"]]))
+            self.device._write(bytearray(b"\x00\x00\x00\x20"))
+        finally:
+            self.device.LINK.crc32 = original
+        self.assertEqual(self.device._read(4), bytearray(b"\x00\x00\x00\x00"))
+
 
     def test_flash_commands_route_rom_and_save_space(self):
         command = self.device.DEVICE_CMD
@@ -312,6 +337,10 @@ class FakeLink:
 
     def write_seq(self, pairs):
         self.seq.extend(pairs)
+
+    def crc32(self, address, length, timeout=10.0):
+        import zlib
+        return zlib.crc32(bytes(self.rom[address:address + length])) & 0xFFFFFFFF
 
     def set_write_plan(self, chunk, words):
         self.plans.append((chunk, len(words) // 4))

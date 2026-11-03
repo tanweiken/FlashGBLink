@@ -62,6 +62,7 @@ class GbxDevice(LK_Device):
         self._save_read_addr = 0
         self._save_write_addr = 0
         self._command_set = 0
+        self._crc_pending = False
         self._mode_selected = False
         self._write_active = False
         self._write_total = 0
@@ -375,6 +376,27 @@ class GbxDevice(LK_Device):
             return
 
         command = self.DEVICE_CMD
+
+        if data[0] == command["CALC_CRC32"]:
+            # LK_Device sends the command, then the length as its own write,
+            # then reads four bytes.  The payload computes the CRC over the
+            # cartridge bus so a sector compare costs no ROM transfer; that is
+            # what makes FlashGBX's "skip writing matching ROM chunks" work.
+            self._crc_pending = True
+            return 1 if wait else None
+
+        if self._crc_pending:
+            self._crc_pending = False
+            length = int.from_bytes(bytes(data[:4]), "big")
+            try:
+                value = self.LINK.crc32(self._rom_read_addr, length)
+            except ProtocolError as error:
+                # An older payload cannot CRC.  A value that does not match
+                # any sector makes FlashGBX write the sector anyway.
+                log("FlashGBLink CALC_CRC32 failed: %s" % error)
+                value = 0
+            self._queue(value.to_bytes(4, "big"))
+            return 1 if wait else None
 
         if data[0] == command["PING"]:
             if len(data) > 1:

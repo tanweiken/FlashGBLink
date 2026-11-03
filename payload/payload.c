@@ -7,9 +7,9 @@
  * a blocking exchange is safe.
  *
  * This program knows nothing about flash chips. It performs 16-bit cartridge
- * stores and loads, byte-wide save stores and loads, a progress bar, and a soft
- * reset. The host composes the chip command sequences (for example from a
- * FlashGBX profile).
+ * stores and loads, byte-wide save stores and loads, a CRC32 over cartridge
+ * bytes, a progress bar, and a soft reset. The host composes the chip command
+ * sequences (for example from a FlashGBX profile).
  *
  * Addresses below 0x08000000 are relative to the cartridge base. Anything else
  * is used verbatim, which is how the host reaches save memory at 0x0E000000
@@ -41,6 +41,8 @@ typedef unsigned int u32;
 #define OP_WRITE8 0x80u
 #define OP_SET_PLAN 0x90u
 #define OP_DONE 0xA0u
+#define OP_CRC32 0xB0u
+#define OP_CRC_GET 0xB1u
 
 #define BLOCK_WORDS 1024u /* packed 32-bit words, 4 KiB of cartridge data */
 #define PLAN_MAX_COMMANDS 12u
@@ -63,6 +65,9 @@ typedef unsigned int u32;
 #define ST_OK 0xA5A50000u
 #define ST_ECHO 0xA5A5E000u
 #define ST_BAD 0xA5A500E1u
+/* Preloaded while a drawing command runs: the host polls for ST_OK and must
+ * not accept the reply that was clocked in mid-draw as confirmation. */
+#define ST_BUSY 0xA5A50001u
 
 struct write_cmd {
 	u32 addr_kind;
@@ -80,6 +85,10 @@ static u32 block_buffer[BLOCK_WORDS];
 static struct write_cmd plan[PLAN_MAX_COMMANDS];
 static u32 plan_count;
 static u32 plan_chunk = 64u;
+/* CRC32 table, built at startup. .bss is not part of the multiboot image. */
+static u32 crc_table[256];
+/* Result of the last CRC32 job, fetched by OP_CRC_GET. */
+static u32 crc_value;
 
 static inline u32 sio_xfer(u32 out)
 {
@@ -141,6 +150,65 @@ static void cmd_read(void)
 
 	for (i = 0; i < count; i++)
 		(void)sio_xfer(rd32(addr + i * 4u));
+	reply = ST_OK;
+}
+
+static void crc32_init(void)
+{
+	u32 i;
+	u32 bit;
+	u32 value;
+
+	for (i = 0; i < 256u; i++) {
+		value = i;
+		for (bit = 0; bit < 8u; bit++)
+			value = (value & 1u) ? (0xEDB88320u ^ (value >> 1))
+					     : (value >> 1);
+		crc_table[i] = value;
+	}
+}
+
+/* CRC32 (IEEE 802.3, the same polynomial as zlib.crc32) of cartridge bytes.
+ * The CRC is computed here so the diff scan costs only the cartridge bus read
+ * instead of sending every byte over the link. */
+static u32 crc32_cart(u32 addr, u32 length)
+{
+	u32 crc = 0xFFFFFFFFu;
+	u32 i = 0;
+
+	while (i + 1u < length) {
+		u16 value = rd16(addr + i);
+
+		crc = crc_table[(crc ^ (u8)value) & 0xFFu] ^ (crc >> 8);
+		crc = crc_table[(crc ^ (u8)(value >> 8)) & 0xFFu] ^ (crc >> 8);
+		i += 2u;
+	}
+	if (i < length) {
+		u16 value = rd16(addr + i);
+
+		crc = crc_table[(crc ^ (u8)value) & 0xFFu] ^ (crc >> 8);
+	}
+	return crc ^ 0xFFFFFFFFu;
+}
+
+/* A CRC32 job. The host clocks the three-word header and then polls with pings:
+ * the Pico clocks the link at a fixed pace, so a reply that waits for this loop
+ * would be clocked into the wrong word. Same deferred-reply pattern as a block
+ * write, whose program time is far longer than a CRC of one sector. */
+static void cmd_crc32(void)
+{
+	u32 addr = sio_xfer(ST_ECHO);
+	u32 length = sio_xfer(ST_ECHO);
+
+	if (length > 0x100000u)
+		length = 0x100000u;
+	crc_value = crc32_cart(addr, length);
+	reply = ST_OK;
+}
+
+static void cmd_crc_get(void)
+{
+	(void)sio_xfer(crc_value);
 	reply = ST_OK;
 }
 
@@ -626,6 +694,12 @@ static void dispatch(u32 hdr)
 	case OP_READ:
 		cmd_read();
 		break;
+	case OP_CRC32:
+		cmd_crc32();
+		break;
+	case OP_CRC_GET:
+		cmd_crc_get();
+		break;
 	case OP_WRITE_BLOCK:
 		cmd_write_block();
 		break;
@@ -633,10 +707,12 @@ static void dispatch(u32 hdr)
 		cmd_set_plan();
 		break;
 	case OP_PROGRESS:
+		REG_SIODATA32 = ST_BUSY;
 		show_progress((hdr >> 16) & 0xFFu, hdr & 0xFFu);
 		reply = ST_OK;
 		break;
 	case OP_DONE:
+		REG_SIODATA32 = ST_BUSY;
 		show_done();
 		reply = ST_OK;
 		break;
@@ -659,6 +735,7 @@ int main(void)
 {
 	sio_init();
 	screen_init();
+	crc32_init();
 	set_default_plan();
 	reply = ST_OK;
 

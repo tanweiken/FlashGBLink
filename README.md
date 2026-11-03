@@ -223,17 +223,25 @@ $PY flash.py image Apotris.gba --boot
 
 - The image is padded with `0xFF` to the end of its last sector; matching
   sectors are skipped.
-- `.flash-state.json` records the sector map, per-sector hashes and a 4 KiB
-  cartridge fingerprint, so later runs skip the 4 MiB diff read. If the
-  fingerprint does not match, the cartridge is read and diffed. `--full`
-  rewrites everything without reading; `--no-verify` skips the read-back.
+- The payload has a CRC32 command, so the diff compares sectors on the
+  cartridge bus: 4 MiB takes about 20 seconds instead of the 2.5 minutes a
+  read-back over the link takes. Sector verification uses the same command, so
+  a verified write only reads ROM data back if a CRC disagrees.
+- A small state file records the last verified CRC32 of every sector plus a
+  probe of each sector, so a repeat run skips even the CRC scan (~1 s). It is
+  stored per profile and sector map under `~/.cache/flashgblink/delta/`;
+  `--state FILE` or `FLASHGBLINK_STATE_DIR` change that. If the probes show the
+  cartridge changed outside the tool, every sector is checked again. `--full`
+  rewrites everything without checking; `--no-verify` skips the read-back and
+  records no state.
 - Each changed sector is erased, programmed in 4 KiB blocks using the profile's
-  buffered-write template, and read back when verifying.
+  buffered-write template, and verified.
 
 Options: `--port`, `--baud` (data phase SPI clock, default 1.25 MHz),
 `--upload-baud` (multiboot clock, default 256 kHz), `--config` (profile
 directory; default: autodetect FlashGBX's), `--profile` (profile name,
-skips autodetection), `FLASHGBLINK_CONFIG` (profile directory override),
+skips autodetection), `--state` (delta state file),
+`FLASHGBLINK_CONFIG` (profile directory override),
 `--gbasend`, `--payload`, `--verbose`.
 
 ## Saves
@@ -260,10 +268,11 @@ and a save that was never dumped is gone.
 
 - **Pico firmware** (`gbasend-pico`) bridges USB serial to the GBA link port.
 - **Payload** (`payload/`) runs in GBA RAM after multiboot, performs 16-bit
-  cartridge stores/loads, byte-wide save access, the progress bars and a soft
-  reset, and holds the profile's write template. Before booting the cartridge it
-  resets the I/O registers left over from multiboot (keypad IRQ, SIO, timers,
-  DMA) so the game starts as it would after a hard reset.
+  cartridge stores/loads, byte-wide save access, a CRC32 over cartridge bytes
+  for diffing and verification, the progress bars and a soft reset, and holds
+  the profile's write template. Before booting the cartridge it resets the I/O
+  registers left over from multiboot (keypad IRQ, SIO, timers, DMA) so the game
+  starts as it would after a hard reset.
 - **FlashGBLink plugin** (`flashgblink/`) implements the AGB-relevant subset of
   FlashGBX's device protocol on top of `flashgblink/gbalink/`, so FlashGBX's `LK_Device`,
   `Flashcart` and profile database run unchanged.
@@ -276,8 +285,10 @@ and a save that was never dumped is gone.
 - EEPROM and save-flash writes are not implemented.
 - Profiles that require a cartridge power cycle abort with a prompt; power the
   GBA off and on holding START+SELECT, re-upload the payload and reconnect.
-- FlashGBX erases every sector in the image; the `.flash-state.json` delta fast
-  path is only available from `flash.py image`.
+- FlashGBX erases every sector in the image unless **Skip writing matching ROM
+  chunks** is enabled (Config menu). The payload's CRC32 command makes that
+  compare cheap; the GUI setting defaults to off. The state-file fast path is
+  only in `flash.py image`.
 - The on-screen progress bars and `flash.py boot` are wired through the CLI;
   FlashGBLink shows both bars during a FlashGBX write, but booting after a write
   is still a CLI action.
@@ -295,9 +306,12 @@ and a save that was never dumped is gone.
   hardware. Detection alone does not guarantee that a cartridge is safe to
   write.
 Measured with a 4 MiB Apotris image on the tested cartridge: a verified full
-write took about **6–7 minutes**, a full read about **2.5 minutes**, and a 64 KiB
-SRAM backup/verified restore took **2.6 / 6.8 seconds**. Actual times depend on
-the cartridge and operation.
+write took about **6–7 minutes** through the read-back verify and **2:51** with
+the CRC verify, a full read about **2.5 minutes**, and a 64 KiB SRAM
+backup/verified restore took **2.6 / 6.8 seconds**. A repeat write of an
+unchanged image is a probe of every sector and takes about a second; a changed
+image only erases, programs and CRC-verifies the sectors that differ. Actual
+times depend on the cartridge and operation.
 
 ## Word protocol
 
@@ -313,6 +327,8 @@ reached with the same commands.
 | `0x5A20nn` | write `nn` address/value pairs (two words per pair) |
 | `0x5A3000` | read: next words are address and count, then `count` dummies |
 | `0x5A5000` | write block: next words are address and packed word count, then data |
+| `0x5AB000` | CRC32 job: next words are address and byte count; poll with pings until OK, then read the result |
+| `0x5AB100` | CRC32 result: next word is a dummy; its reply is the last job's CRC32 |
 | `0x5A0060nn` / `0x5A0160nn` | draw `nn`% on the write (green) / verify (cyan) bar |
 | `0x5AA000` | show the FLASH COMPLETE / RESTART GBA TO PLAY screen |
 | `0x5A7000` | read bytes: next words are address and byte count, then dummies |
@@ -320,6 +336,7 @@ reached with the same commands.
 | `0x5A40nn` | soft reset into the cartridge |
 | `0x5A9000` | install a write template: chunk bytes, command count, then 4 words per command |
 | `0xA5A50000` | OK |
+| `0xA5A50001` | busy (drawing); retry the poll |
 | `0xA5A500E1` | rejected command |
 
 ## Cartridge notes

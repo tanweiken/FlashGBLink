@@ -146,7 +146,68 @@ The M36 identity, CFI and timings above still apply: the detected profile is
 `fc_AGB_M36L0R806.txt`, whose buffered-write sequence is the same `E8`/`D0`/`FF`
 pattern the first payload hard-coded. The sector map now comes from that
 profile's CFI data (255 x 128 KiB + 4 x 32 KiB on this cartridge), and the state
-file records the map as well as the per-sector hashes.
+file records the map as well as the per-sector CRC32s.
+
+## Payload CRC32 (delta detection)
+
+Added 2026-11-04. The payload reports a CRC32 over cartridge bytes, so a diff
+scan and a post-program verify cost only the cartridge bus read instead of a
+transfer over the link.
+
+| Item | Now |
+|---|---|
+| Payload | `payload/flasher.gba`, 5504 bytes, sha256 `e7236c480c7446a779bb223b3e2ac1a3936ce0fbfd598d289c9b12a8ebb6945c` |
+| New opcodes | `0x5AB000` start a CRC32 job (address, byte count); `0x5AB100` read the result |
+| FlashGBX | the plugin answers `CALC_CRC32` (0xD5), so **Config → Skip writing matching ROM chunks** now skips matching sectors |
+
+`flash.py image` compares one CRC per sector (32 round trips for 4 MiB) instead
+of reading the image back, and verifies a programmed sector with one CRC
+instead of a 128 KiB read. The job is polled and fetched separately because the
+Pico clocks the link at a fixed pace: a reply that waited for a whole sector to
+be CRC'd would be clocked into the wrong word.
+
+Measured on the M36 cart, 2026-11-04, `main` at 1.25 MHz:
+
+| Operation | Result |
+|---|---|
+| payload CRC of 128 KiB | 0.54 s (~240 KB/s) |
+| same 128 KiB read over the link | 4.3–4.7 s (8–9× slower) |
+| CRC correctness | equal to `zlib.crc32` of the read-back bytes, 3 sectors |
+| cold 4 MiB diff (no state) | 21–22 s for 32 sectors |
+| repeat diff (state hit) | 0.55 s, no reads, no writes |
+| one changed deep sector (4 KiB programmed) | 2.4 s, verified, read-back confirmed |
+| external change (`program` outside the tool) | probes detect it, CRC scan, sector repaired |
+| full 4 MiB write with CRC verify | 2:50.93 (was 6:03–6:07 with a read verify) |
+| FlashGBX compare through `CALC_CRC32` | 0.60 s per 128 KiB |
+| FlashGBX write, all 32 sectors skipped | 21.5 s (was 403.9 s) |
+
+The `--full` write hit one rejected block (~1 in a few hundred) and the new
+sector retry re-erased and rewrote it; the rest of the run was clean. That
+rejection is link-level, not CRC related: it reproduces with the CRC command
+disabled.
+
+The CRC implementation was checked against `zlib.crc32` on the host for even
+and odd lengths as well as on the cartridge.
+
+### Progress/CRC handshake fix
+
+Running the CRC scan on hardware exposed a race that also affected the old
+progress bar: the payload shifts out whatever is in `SIODATA32`, so a
+confirmation ping that arrives while the bar is still being drawn can read the
+previous `ST_OK` and "confirm" an update the payload has not started yet. The
+payload is then left waiting for a clock, and the next command is shifted by one
+word.
+
+`0x5A0060nn` and `0x5AA000` now preload `0xA5A50001` (busy) before drawing and
+`ST_OK` only when they return to the word loop, so a mid-draw reply can never be
+mistaken for the confirmation. The host also polls the confirmation every 20 ms
+instead of in a tight loop: a ping flood saturates the Pico's USB path and can
+byte-shift the reply stream. The CRC command's replies are checked for the echo
+status on both argument words, which catches an out-of-frame start instead of
+issuing a job over a shifted frame. The payload caps a CRC job at 1 MiB, so a
+misread length cannot hold the link for long. A block rejected mid-sector now
+re-erases and rewrites the sector instead of aborting the image.
+
 
 ## FlashGBLink device backend
 
@@ -166,10 +227,12 @@ Recorded 2026-11-01 on the same setup, after switching the host to FlashGBX
 | Independent read-back after write | header, first/last 64 KiB, then all 4 MiB match |
 | GBA progress UI | title, WRITE/VERIFY labels, percentages, green/cyan bars, FLASH COMPLETE / RESTART GBA TO PLAY |
 
-The adapter's write path erases every sector in the image (FlashGBX behaviour);
-the `.flash-state.json` delta fast path remains a `flash.py image` feature.  The
-state file still describes the previous Apotris image after these writes, so the
-next `flash.py image` reads the cartridge back and refreshes it.
+The adapter's write path erases every sector in the image unless FlashGBX's
+**Skip writing matching ROM chunks** is enabled; with the payload's CRC32
+command that compare now runs on the cartridge bus, and `flash.py image` uses
+the same command for its diff and verify. The state file still describes the
+previous Apotris image after a write from FlashGBX, so the next
+`flash.py image` checks every sector with a CRC and refreshes it.
 
 
 ## Connect auto-upload

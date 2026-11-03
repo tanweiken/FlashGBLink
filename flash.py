@@ -21,24 +21,26 @@ https://github.com/nullstalgia/gbasend-rs.
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import struct
 import subprocess
 import sys
 import time
+import zlib
 from pathlib import Path
 
 from flashgbx import (ProfileError, ProtocolError, cfi_sector_regions,
                       find_config_dir, find_profile, load_profiles,
                       normalize_cfi, parse_cfi, relocate_commands, swap_bits)
 from flashgblink.gbalink import (ADDR_ABS, ADDR_PA, ADDR_SA, BLOCK_BYTES, HDR_MAGIC,
-                     OP_BOOT, OP_DONE, OP_PROGRESS, OP_READ, OP_READ8, OP_SET_PLAN,
-                     OP_WRITE8, OP_WRITE_BLOCK, OP_WRITE_SEQ, PAYLOAD, PING,
-                     PLAN_MAX_COMMANDS, RESYNC_WORDS, ST_BAD, ST_OK,
+                     OP_BOOT, OP_CRC32, OP_CRC_GET, OP_DONE, OP_PROGRESS, OP_READ, OP_READ8,
+                     OP_SET_PLAN, OP_WRITE8, OP_WRITE_BLOCK, OP_WRITE_SEQ, PAYLOAD,
+                     PING, PLAN_MAX_COMMANDS, RESYNC_WORDS, ST_BAD, ST_OK,
                      VAL_BS, VAL_CONST, VAL_PD, WAIT_ABS, WAIT_NONE, WAIT_PD,
-                     WAIT_SA, Link, PlanError, TransferError, _check_status,
-                     _hex, _pack_words, done, find_port, progress, read_region,
-                     single_write_waits, write_block)
+                     WAIT_SA, Link, PlanError, TransferError, UnsupportedCommand,
+                     _check_status, _hex, _pack_words, done, find_port, progress,
+                     read_region, single_write_waits, write_block)
 from flashgblink.gbalink.plan import encode_write_plan as plan_encode_write_plan
 from flashgblink.gbalink.plan import prepare_write as plan_prepare_write
 
@@ -47,8 +49,9 @@ from flashgblink.gbalink.plan import prepare_write as plan_prepare_write
 ID_SEQ = [(0, 0x90)]
 CFI_SEQ = [(0xAA, 0x98)]
 
-STATE_PATH = Path(__file__).resolve().parent / ".flash-state.json"
-FINGERPRINT_BYTES = 4096
+STATE_VERSION = 3
+STATE_DIR_ENV = "FLASHGBLINK_STATE_DIR"
+PROBE_BYTES = 16
 CFI_BYTES = 0x400
 
 
@@ -56,7 +59,7 @@ CFI_BYTES = 0x400
 
 def _read_bytes(link, address, length):
     words = link.read_words(address, (length + 3) // 4)
-    return b"".join(struct.pack("<I", word) for word in words)[:length]
+    return struct.pack("<%dI" % len(words), *words)[:length]
 
 
 def _reset_pairs(profile, address):
@@ -491,40 +494,128 @@ def prepare_write(link, profile, cfi=None):
         command_set=profile.command_set, name=profile.primary_name)
 
 
-def _sector_hashes(image, sectors):
-    return [hashlib.sha256(image[offset:offset + size]).hexdigest()
-            for offset, size in sectors]
+def _crc32(data):
+    return zlib.crc32(data) & 0xFFFFFFFF
 
 
-def _load_state(path, sectors):
+def _sector_crcs(image, sectors):
+    """CRC32 of each sector of the image, as the payload reports them."""
+    return [_crc32(image[offset:offset + size]) for offset, size in sectors]
+
+
+def _probe_points(offset, size):
+    """Three byte offsets sampled in a sector: start, middle, end."""
+    if size <= 0:
+        return []
+    points = []
+    for point in (offset, offset + size // 2,
+                  offset + max(0, size - PROBE_BYTES)):
+        point = min(max(point, offset), offset + size - 1)
+        if point not in points:
+            points.append(point)
+    return sorted(points)
+
+
+def _probe_spec(sectors):
+    """Regions read to tell whether the cartridge changed since the state.
+
+    The old 4 KiB fingerprint of sector 0 missed every change after the first
+    sector.  Sampling every sector costs one small read per point but covers
+    the whole image.
+    """
+    spec = []
+    for offset, size in sectors:
+        for point in _probe_points(offset, size):
+            spec.append([point, min(PROBE_BYTES, offset + size - point)])
+    return spec
+
+
+def _probe_digest(link, spec):
+    digest = hashlib.sha256()
+    for offset, length in spec:
+        digest.update(read_region(link, offset, length))
+    return digest.hexdigest()
+
+
+def _state_key(profile, sectors):
+    name = "-".join(part for part in "".join(
+        character if character.isalnum() else "-"
+        for character in profile.primary_name).lower().split("-") if part)
+    digest = hashlib.sha256(json.dumps(
+        [[offset, size] for offset, size in sectors]).encode()).hexdigest()
+    return "%s-%s" % (name[:48] or "cart", digest[:8])
+
+
+def default_state_path(profile, sectors):
+    """A cache file per cartridge profile and sector map.
+
+    The state used to live next to the script, so two cartridges, or a
+    read-only install, either invalidated each other or failed to save.
+    """
+    root = os.environ.get(STATE_DIR_ENV)
+    if not root:
+        root = str(Path.home() / ".cache" / "flashgblink" / "delta")
+    return Path(root) / (_state_key(profile, sectors) + ".json")
+
+
+def _load_state(path, sectors, size, probe_spec):
     try:
         state = json.loads(Path(path).read_text())
     except Exception:
         return None
-    if state.get("version") != 2:
+    if state.get("version") != STATE_VERSION or state.get("size") != size:
         return None
-    if state.get("sector_map") != [[offset, size]
-                                   for offset, size in sectors]:
+    if state.get("sector_map") != [[offset, size_]
+                                   for offset, size_ in sectors]:
+        return None
+    if state.get("probe_spec") != probe_spec:
+        return None
+    if (not isinstance(state.get("crc32"), list)
+            or len(state["crc32"]) != len(sectors)):
         return None
     return state
 
 
-def _fingerprint(image):
-    return hashlib.sha256(image[:FINGERPRINT_BYTES]).hexdigest()
-
-
-def _save_state(path, image, sectors, hashes):
-    Path(path).write_text(json.dumps({
-        "version": 2,
-        "image_sha256": hashlib.sha256(image).hexdigest(),
-        "fingerprint": _fingerprint(image),
+def _save_state(path, image, sectors, image_crcs, probe_spec, link):
+    state = {
+        "version": STATE_VERSION,
         "sector_map": [[offset, size] for offset, size in sectors],
         "size": len(image),
-        "sectors": hashes,
-    }, indent=1))
+        "crc32": image_crcs,
+        "probe_spec": probe_spec,
+        "probe": _probe_digest(link, probe_spec),
+    }
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(json.dumps(state, indent=1))
+    except OSError as error:
+        print("warning: could not save the delta state to %s (%s)"
+              % (path, error))
 
 
-def _verify_sector(link, start, chunk, attempts=3):
+def _crc_supported(link):
+    try:
+        link.crc32(0, 4)
+    except UnsupportedCommand:
+        return False
+    return True
+
+
+def _verify_sector(link, profile, start, chunk, use_crc=False, attempts=3):
+    """Return None if the sector matches, else the read-back bytes."""
+    cart_reset(link, profile, address=start)
+    if use_crc:
+        expected = _crc32(chunk)
+        for attempt in range(attempts):
+            if link.crc32(start, len(chunk)) == expected:
+                return None
+            if attempt + 1 < attempts:
+                print(" retry ...", end="", flush=True)
+                time.sleep(0.05)
+        back = read_region(link, start, len(chunk))
+        # The CRC is the cheap check; a byte comparison settles a disagreement
+        # and keeps the error message able to name the first differing byte.
+        return None if back == chunk else back
     back = None
     for attempt in range(attempts):
         back = read_region(link, start, len(chunk))
@@ -542,7 +633,7 @@ def _program_sector(link, profile, start, chunk, block_bytes):
     written = 0
     for offset in range(0, len(chunk), block_bytes):
         block = chunk[offset:offset + block_bytes]
-        if block == b"\xff" * len(block):
+        if block.count(0xFF) == len(block):
             continue
         write_block(link, start + offset, block)
         written += len(block)
@@ -550,7 +641,7 @@ def _program_sector(link, profile, start, chunk, block_bytes):
 
 
 def write_image(link, path, profile, cfi=None, full=False, verify=True,
-                boot=False, state_path=STATE_PATH):
+                boot=False, state_path=None):
     image = Path(path).read_bytes()
     if not image:
         raise ProtocolError("image is empty")
@@ -593,31 +684,42 @@ def write_image(link, path, profile, cfi=None, full=False, verify=True,
         raise ProfileError("sector map does not cover the whole image")
     block_bytes, chunk_bytes = prepare_write(link, profile, cfi)
 
-    hashes = _sector_hashes(image, sectors)
+    image_crcs = _sector_crcs(image, sectors)
+    probe_spec = _probe_spec(sectors)
+    use_crc = _crc_supported(link)
+    if state_path is None:
+        state_path = default_state_path(profile, sectors)
     print("image: %s (%d bytes, sha256 %s)"
           % (path, len(image), hashlib.sha256(image).hexdigest()))
     print("sectors: %d, write window: %d bytes"
           % (len(sectors), chunk_bytes))
 
-    state = None if full else _load_state(state_path, sectors)
-    if state is not None and (state.get("size") != len(image)
-                              or len(state.get("sectors", [])) != len(hashes)):
-        state = None
+    state = None if full else _load_state(state_path, sectors, len(image),
+                                          probe_spec)
     if state is not None:
         # The state is only a hint: confirm the cartridge still looks like it
-        # did when the state was written before skipping the full diff read.
-        current = _fingerprint(read_region(link, 0, FINGERPRINT_BYTES))
-        if current != state.get("fingerprint"):
-            print("cartridge changed outside the tool; reading it back")
+        # did when the state was written before trusting it.
+        if _probe_digest(link, probe_spec) != state.get("probe"):
+            print("cartridge changed outside the tool; checking every sector")
             state = None
 
     if full:
-        dirty = list(range(len(hashes)))
+        dirty = list(range(len(image_crcs)))
         print("full: rewriting all %d sectors" % len(dirty))
     elif state is not None:
-        dirty = [index for index, digest in enumerate(hashes)
-                 if state["sectors"][index] != digest]
-        print("state: %d of %d sectors changed" % (len(dirty), len(hashes)))
+        dirty = [index for index, crc in enumerate(image_crcs)
+                 if crc != state["crc32"][index]]
+        print("state: %d of %d sectors changed" % (len(dirty), len(image_crcs)))
+    elif use_crc:
+        print("checking %d sectors on the cartridge ..." % len(sectors))
+        dirty = []
+        for index, ((offset, size), expected) in enumerate(zip(sectors,
+                                                               image_crcs)):
+            cart_reset(link, profile, address=offset)
+            if link.crc32(offset, size) != expected:
+                dirty.append(index)
+            progress(link, (index + 1) * 100 // len(sectors))
+        print("diff: %d of %d sectors changed" % (len(dirty), len(sectors)))
     else:
         print("reading %d bytes from the cartridge ..." % len(image))
         current = bytearray()
@@ -632,6 +734,9 @@ def write_image(link, path, profile, cfi=None, full=False, verify=True,
 
     if not dirty:
         print("cartridge already matches the image")
+        if state is None:
+            _save_state(state_path, image, sectors, image_crcs, probe_spec,
+                        link)
         progress(link, 100)
         done(link)
         if boot:
@@ -648,17 +753,29 @@ def write_image(link, path, profile, cfi=None, full=False, verify=True,
         print("[%d/%d] sector 0x%X (0x%X bytes) ..."
               % (number, len(dirty), offset, size), end="", flush=True)
         back = None
+        error = None
         for attempt in range(2):
-            written = _program_sector(link, profile, offset, chunk,
-                                      block_bytes)
+            try:
+                written = _program_sector(link, profile, offset, chunk,
+                                          block_bytes)
+            except ProtocolError as failure:
+                # A rejected block leaves the sector half programmed; erase it
+                # again rather than aborting the whole image.
+                error = failure
+                print(" %s, re-erasing ..." % failure, end="", flush=True)
+                continue
+            error = None
             print(" wrote %d bytes" % written, end="", flush=True)
             if not verify:
                 break
-            back = _verify_sector(link, offset, chunk)
+            back = _verify_sector(link, profile, offset, chunk, use_crc)
             if back is None:
                 print(", verified", end="")
                 break
             print(" mismatch, rewriting ...", end="", flush=True)
+        if error is not None:
+            raise ProtocolError(
+                "sector 0x%X could not be programmed: %s" % (offset, error))
         if verify and back is not None:
             position = next(position for position in range(len(chunk))
                             if back[position] != chunk[position])
@@ -670,7 +787,11 @@ def write_image(link, path, profile, cfi=None, full=False, verify=True,
         progress(link, number * 100 // len(dirty))
         print()
 
-    _save_state(state_path, image, sectors, hashes)
+    if verify:
+        _save_state(state_path, image, sectors, image_crcs, probe_spec, link)
+    else:
+        print("note: --no-verify does not record the delta state; "
+              "the next run checks the cartridge")
     progress(link, 100)
     done(link)
     print("done")
@@ -914,7 +1035,10 @@ def main(argv=None):
                        help="ignore the diff and state, rewrite every sector")
     image.add_argument("--no-verify", action="store_true")
     image.add_argument("--boot", action="store_true")
-    image.add_argument("--state", default=str(STATE_PATH))
+    image.add_argument("--state", default=None,
+                       help="delta state file (default: a cache file keyed by "
+                            "the profile and sector map; "
+                            "FLASHGBLINK_STATE_DIR changes the directory)")
 
     args = parser.parse_args(argv)
     # The shared parent actions use SUPPRESS so the subparser cannot overwrite
@@ -1002,10 +1126,10 @@ def main(argv=None):
                     cart_reset(link)
             print_cfi(info)
         elif args.command == "read":
-            count = (args.length + 3) // 4
-            words = link.read_words(args.address, count)
-            data = b"".join(struct.pack("<I", word) for word in words)
-            Path(args.output).write_bytes(data[:args.length])
+            # Read in link-sized chunks: a single multi-megabyte frame blocks
+            # the host's serial write while the Pico drains it.
+            data = read_region(link, args.address, args.length)
+            Path(args.output).write_bytes(data)
             print("wrote %d bytes to %s" % (args.length, args.output))
         elif args.command == "save":
             data = save_dump(link, args.output, args.size)
