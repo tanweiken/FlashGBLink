@@ -1,6 +1,6 @@
-# FlashGBLink — a FlashGBX plugin for reading and flashing carts using your GBA
+# FlashGBLink — a FlashGBX plugin for reading and writing carts using your GBA
 
-**Read and flash supported Game Boy Advance cartridges without removing them
+**Read and write supported Game Boy Advance cartridges without removing them
 from the console.** Connect a Raspberry Pi Pico to your GBA's link port and use
 the [FlashGBX](https://github.com/Lesserkuma/FlashGBX) desktop app for cartridge
 detection, ROM and save backups, and verified writes. A standalone CLI is
