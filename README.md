@@ -15,16 +15,18 @@ devices. A small payload boots into GBA RAM over the BIOS multiboot link, then
 bridges the Pico to the cartridge. During a write, the console shows live green
 write and cyan verification progress, then a completion screen.
 
-> **Experimental performance branch (plugin `0.3.0b1`).** This line paces the
-> link port by the GBA's SO ready line instead of a fixed per-word delay. On the
-> tested 32 MiB cartridge it reads 3.6× faster and does a verified 4 MiB write
-> 2.7–2.8× faster than the `main` release (see
-> [`docs/hardware-baseline.md`](docs/hardware-baseline.md)). It needs the
-> matching `gbasend` from
+> **Experimental performance branch (plugin `0.3.0b2`).** This line paces the
+> link port by the GBA's SO ready line instead of a fixed per-word delay, and
+> carries the CRC32 delta work from `main` 0.2.3. On the tested 32 MiB
+> cartridge it reads 3.6× faster and does a verified 4 MiB write 2.7–2.8×
+> faster than the 0.2.2 release (see
+> [`docs/hardware-baseline.md`](docs/hardware-baseline.md)); the CRC32 diff and
+> verify remove the ROM read-back on top of that. It needs the matching
+> `gbasend` from
 > [tanweiken/gbasend-rs](https://github.com/tanweiken/gbasend-rs) commit
 > `a1257e4`, and the UF2 images in `firmware/` are built from that commit —
 > payload, plugin and firmware must come from this branch together. `main`
-> stays on the 0.2.2 release for the upstream-compatible setup.
+> stays on the 0.2.3 release for the upstream-compatible setup.
 
 ## Credits
 
@@ -340,6 +342,11 @@ setup: 3.6× on reads and 2.7× on a full verified write. The handshake only
 engages at or above 1 Mbaud; slower sessions, the BIOS multiboot phase and an
 older payload all keep the fixed delay, so mixed installs stay safe. See
 `docs/hardware-baseline.md` for the measurements and how they were taken.
+
+This line also carries the payload CRC32 delta work: a repeat write of an
+unchanged image is a probe of every sector (~1 s), a cold diff compares one CRC
+per sector instead of reading the image back, and a programmed sector is
+verified with one CRC instead of a 128 KiB read.
 
 ## Word protocol
 
