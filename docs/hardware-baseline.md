@@ -160,6 +160,11 @@ transfer over the link.
 | New opcodes | `0x5AB000` start a CRC32 job (address, byte count); `0x5AB100` read the result |
 | FlashGBX | the plugin answers `CALC_CRC32` (0xD5), so **Config → Skip writing matching ROM chunks** now skips matching sectors |
 
+On the `performance` line the same sources are built with the SO flow control
+(`0.3.0b2`): 5872 bytes, sha256
+`9d30f8a32a9bbd71e7010faa248ea639ec230ff140b16ef16c011bde66980a05`. The
+timings below were measured with the `main` payload on stock firmware.
+
 `flash.py image` compares one CRC per sector (32 round trips for 4 MiB) instead
 of reading the image back, and verifies a programmed sector with one CRC
 instead of a 128 KiB read. The job is polled and fetched separately because the
@@ -260,6 +265,11 @@ the data register; the Pico waits for SO low before clocking each word, with a
 | Bridge | `firmware/gbasend-pico.uf2` / `-rgb.uf2`, gbasend-rs `a72da50` plus the flow-control change |
 | Payload | `payload/flasher.gba`, 5456 bytes, sha256 `7fccb2b6fdf4f769717c89f6ca63df59a02d52c0f94ef5e748b177b093f84d45` |
 | Host | `Link.xfer` no longer calls `ser.flush()` per exchange |
+
+`0.3.0b2` rebuilds this payload together with the CRC32 work from `main`
+0.2.3: 5872 bytes, sha256
+`9d30f8a32a9bbd71e7010faa248ea639ec230ff140b16ef16c011bde66980a05`. The
+measurements below were taken with the b1 payload (no CRC32).
 
 The payload change is a handful of register writes per word: assert SO with
 start clear, load `SIODATA32`, drop SO for the ready window, set start, then
