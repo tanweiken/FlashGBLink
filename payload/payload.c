@@ -3,8 +3,9 @@
  *
  * Transport: GBA SIO normal mode, 32-bit, external clock (slave). Each word the
  * host clocks in is exchanged for a word this program preloaded. The host is
- * gbasend-pico behaving as a plain SPI bridge; it paces one word at a time, so
- * a blocking exchange is safe.
+ * gbasend-pico behaving as a plain SPI bridge, pacing itself by the SO line:
+ * SO is high while this program is busy and low once the next reply is loaded,
+ * so the bridge clocks immediately instead of waiting out a fixed delay.
  *
  * This program knows nothing about flash chips. It performs 16-bit cartridge
  * stores and loads, byte-wide save stores and loads, a CRC32 over cartridge
@@ -49,6 +50,7 @@ static u16 sim_vram[240u * 160u];
 
 #define SIOCNT_32BIT 0x1000u
 #define SIOCNT_START 0x0080u
+#define SIOCNT_SO 0x0008u /* SO output: high means "not ready for the next word" */
 
 #define CART_BASE 0x08000000u
 
@@ -139,20 +141,30 @@ static inline void sio_init(void)
 #else
 static inline u32 sio_xfer(u32 out)
 {
+	/* Flow control for the bridge: hold SO high while this program is busy,
+	 * drop it once the reply is in the data register, and raise it again as
+	 * soon as the word has been clocked in. The bridge waits for SO low
+	 * before every word, so the transfer no longer needs a fixed delay.
+	 * Each step writes the whole control word, so there is no read-modify-
+	 * write of the status register in the hot path. */
+	REG_SIOCNT = SIOCNT_32BIT | SIOCNT_SO; /* busy, start clear */
 	REG_SIODATA32 = out;
-	REG_SIOCNT = (u16)(REG_SIOCNT | SIOCNT_START);
+	REG_SIOCNT = SIOCNT_32BIT; /* ready for the next word */
+	REG_SIOCNT = SIOCNT_32BIT | SIOCNT_START;
 	while (REG_SIOCNT & SIOCNT_START)
 		;
+	REG_SIOCNT = SIOCNT_32BIT | SIOCNT_SO;
 	return REG_SIODATA32;
 }
 
 static inline void sio_init(void)
 {
 	/* Toggle Joybus mode and back to reset the SIO circuitry, then run as a
-	 * 32-bit normal-mode slave with the clock supplied by the host. */
+	 * 32-bit normal-mode slave with the clock supplied by the host. Start
+	 * out busy: main() asserts ready by loading the first reply. */
 	REG_RCNT = 0xC000u;
 	REG_RCNT = 0x0000u;
-	REG_SIOCNT = SIOCNT_32BIT;
+	REG_SIOCNT = SIOCNT_32BIT | SIOCNT_SO;
 }
 #endif
 

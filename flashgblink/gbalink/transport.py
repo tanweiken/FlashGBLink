@@ -162,7 +162,10 @@ class Link:
         with self._cond:
             self._buffer.clear()
         self.ser.write(frames)
-        self.ser.flush()
+        # No flush(): the bridge paces itself by the GBA's SO line, so the next
+        # word can follow as soon as it is queued. Waiting for transmission to
+        # drain here only adds a per-transfer round trip, and a short reply is
+        # caught by the deadline below regardless.
         deadline = time.monotonic() + timeout
         with self._cond:
             while len(self._buffer) < expected:
