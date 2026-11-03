@@ -352,6 +352,42 @@ upload_payload() {
 	"${upload_command[@]}"
 }
 
+timestamp() {
+	date '+%Y-%m-%d %H:%M:%S'
+}
+
+format_elapsed() {
+	local seconds=$1
+	if ((seconds >= 3600)); then
+		printf '%dh %02dm %02ds' \
+			$((seconds / 3600)) $((seconds % 3600 / 60)) $((seconds % 60))
+	elif ((seconds >= 60)); then
+		printf '%dm %02ds' $((seconds / 60)) $((seconds % 60))
+	else
+		printf '%ds' "$seconds"
+	fi
+}
+
+# Run the flash command and report when it finished and how long it took.
+flash_once() {
+	local started finished elapsed status
+	printf '\n== %s flashing %s ==\n' "$(timestamp)" "$(basename "$ROM")"
+	started=$(date +%s)
+	if "${command[@]}"; then
+		status=0
+	else
+		status=$?
+	fi
+	finished=$(date +%s)
+	elapsed=$(format_elapsed $((finished - started)))
+	if ((status == 0)); then
+		printf '== %s flash finished in %s ==\n' "$(timestamp)" "$elapsed"
+	else
+		printf '== %s flash failed after %s ==\n' "$(timestamp)" "$elapsed" >&2
+	fi
+	return "$status"
+}
+
 watch_loop() {
 	local last_stamp="" last_checksum="" stamp stable checksum needs_upload=0
 	printf 'watching %s for rebuilds every %ss (Ctrl-C to stop)\n' \
@@ -377,9 +413,7 @@ watch_loop() {
 							done
 							needs_upload=0
 						fi
-						printf '\n== %s flashing %s ==\n' \
-							"$(date '+%H:%M:%S')" "$(basename "$ROM")"
-						if ! "${command[@]}"; then
+						if ! flash_once; then
 							if ((!boot)); then
 								printf 'error: flash failed; restart the watcher\n' >&2
 								return 1
@@ -389,7 +423,7 @@ watch_loop() {
 								printf 'error: upload failed; restart the watcher\n' >&2
 								return 1
 							fi
-							if ! "${command[@]}"; then
+							if ! flash_once; then
 								printf 'error: flash failed after upload; restart the watcher\n' >&2
 								return 1
 							fi
@@ -412,12 +446,12 @@ watch_loop() {
 if ((watch)); then
 	watch_loop
 elif ((save_pending)); then
-	if "${command[@]}"; then
+	if flash_once; then
 		save_settings
 	else
 		status=$?
 		exit "$status"
 	fi
 else
-	exec "${command[@]}"
+	flash_once
 fi
