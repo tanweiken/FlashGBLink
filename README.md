@@ -331,12 +331,13 @@ The bundled payload and Pico firmware pace each word by the GBA's SO line
 instead of a fixed delay, and the host no longer waits for the serial write to
 drain. That took the link from a fixed 150 µs per word to about 43 µs on this
 setup: 3.6× on reads and 2.7× on a full verified write, measured at 1.25 Mbaud
-with the first handshake margins. `0.3.0b3` widens those margins by about 18 µs
-per word so the handshake survives 1.5–1.8 Mbaud, where the extra clock speed
-more than pays it back; the end-to-end numbers have not been re-timed at that
-clock. The handshake only engages at or above 1 Mbaud; slower sessions, the BIOS
-multiboot phase and an older payload all keep the fixed delay, so mixed installs
-stay safe. See `docs/hardware-baseline.md` for the measurements.
+with the first handshake margins. `0.3.0b3` widens those margins by about 13 µs
+per word so the handshake stays clean to 1.8 Mbaud, where the extra clock gives
+back roughly half of it: at `--baud 1800000` the 4 MiB read takes **52 s** and a
+full `--full --boot` write **1:54** (3.1× and 3.2× the 0.2.2 baseline). The
+handshake only engages at or above 1 Mbaud; slower sessions, the BIOS multiboot
+phase and an older payload all keep the fixed delay, so mixed installs stay
+safe. See `docs/hardware-baseline.md` for the measurements.
 
 This line also carries the payload CRC32 delta work: a repeat write of an
 unchanged image is a probe of every sector (~1 s), a cold diff compares one CRC
