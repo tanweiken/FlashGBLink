@@ -22,3 +22,9 @@ jobs:
             firmware/gbasend-pico.uf2
             firmware/gbasend-pico-rgb.uf2
             dist/FlashGBLink-plugin.zip
+          # Beta/rc tags ship as pre-releases and never become "Latest", so
+          # the stable tag stays the one users are pointed at.
+          prerelease: ${{ contains(github.ref_name, 'b') || contains(github.ref_name, 'rc') }}
+          make_latest: ${{ (contains(github.ref_name, 'b') || contains(github.ref_name, 'rc')) && 'false' || 'legacy' }}
+          # Notes come from docs/releases/<tag>.md when that file exists.
+          body_path: ${{ hashFiles(format('docs/releases/{0}.md', github.ref_name)) != '' && format('docs/releases/{0}.md', github.ref_name) || '' }}
