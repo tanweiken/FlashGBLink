@@ -15,6 +15,16 @@ devices. A small payload boots into GBA RAM over the BIOS multiboot link, then
 bridges the Pico to the cartridge. During a write, the console shows live green
 write and cyan verification progress, then a completion screen.
 
+> **Experimental performance branch.** The
+> [`performance`](https://github.com/tanweiken/FlashGBLink/tree/performance)
+> branch (plugin `0.3.0b1`) paces the link port by the GBA's SO ready line. On
+> the tested cartridge it reads **3.6× faster** (4 MiB in 45 s instead of
+> 160 s) and writes **2.7–2.8× faster** (verified 4 MiB in 2:13 instead of
+> 6:03), but it needs its own payload, UF2 images and a forked `gbasend` from
+> [tanweiken/gbasend-rs](https://github.com/tanweiken/gbasend-rs) commit
+> `a1257e4`. `main` stays on the 0.2.2 release, which works with upstream
+> `nullstalgia/gbasend-rs`.
+
 ## Credits
 
 FlashGBLink is mostly glue around two excellent upstream projects. Without them
