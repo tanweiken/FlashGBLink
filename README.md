@@ -15,18 +15,16 @@ devices. A small payload boots into GBA RAM over the BIOS multiboot link, then
 bridges the Pico to the cartridge. During a write, the console shows live green
 write and cyan verification progress, then a completion screen.
 
-> **Experimental performance branch.** The
-> [`performance`](https://github.com/tanweiken/FlashGBLink/tree/performance)
-> branch paces the link port by the GBA's SO ready line instead of a fixed
-> per-word delay. On the tested cartridge it reads roughly 3–4× faster and
-> writes a verified image roughly 2.5–3× faster than this branch; the current
-> figures are in that branch's
-> [`docs/hardware-baseline.md`](https://github.com/tanweiken/FlashGBLink/blob/performance/docs/hardware-baseline.md).
-> It is a matched set: payload, plugin and Pico firmware all come from that
-> branch, plus the `gbasend` from
-> [tanweiken/gbasend-rs](https://github.com/tanweiken/gbasend-rs) that its
-> `firmware/README.md` pins. This branch (`main`) stays on its stable release
-> line and works with upstream `nullstalgia/gbasend-rs`.
+> **Experimental performance branch (plugin `0.3.0b1`).** This line paces the
+> link port by the GBA's SO ready line instead of a fixed per-word delay. On the
+> tested 32 MiB cartridge it reads 3.6× faster and does a verified 4 MiB write
+> 2.7–2.8× faster than the `main` release (see
+> [`docs/hardware-baseline.md`](docs/hardware-baseline.md)). It needs the
+> matching `gbasend` from
+> [tanweiken/gbasend-rs](https://github.com/tanweiken/gbasend-rs) commit
+> `a1257e4`, and the UF2 images in `firmware/` are built from that commit —
+> payload, plugin and firmware must come from this branch together. `main`
+> stays on the 0.2.2 release for the upstream-compatible setup.
 
 ## Credits
 
@@ -43,7 +41,10 @@ there would be no link and no cartridge knowledge:
 - **[gbasend-rs](https://github.com/nullstalgia/gbasend-rs)** by **nullstalgia**
   (MIT OR Apache-2.0) — the RP2040 firmware, the USB↔SPI bridge, the multiboot
   upload protocol and the `gbasend` CLI. The prebuilt UF2s in `firmware/` are
-  unmodified copies. The entire Pico/link/upload layer is theirs.
+  built from
+  [tanweiken/gbasend-rs](https://github.com/tanweiken/gbasend-rs) commit
+  `a1257e4`, a fork of that project which adds the SO ready-line handshake. The
+  entire Pico/link/upload layer is theirs.
 
 This project adds the GBA-side payload (16-bit and byte-wide cartridge access,
 the profile-driven write-template engine, the two progress bars and the soft
@@ -92,13 +93,18 @@ VCC.** Wiring: Pico GP0 → GBA SO, GP2 → GBA SC, GP3 → GBA SI, and GND, wit
 
 3. **Build `gbasend`.** The plugin uses this small Rust command-line tool to
    upload the payload to the GBA over USB and the Pico. It is not bundled in the
-   plugin archive; build it once:
+   plugin archive; build the fork this branch is validated against, once:
 
    ```sh
-   git clone https://github.com/nullstalgia/gbasend-rs
+   git clone https://github.com/tanweiken/gbasend-rs
+   git -C gbasend-rs checkout a1257e4
    cargo build --release --manifest-path gbasend-rs/gbasend-cli/Cargo.toml
    GBASEND="$PWD/gbasend-rs/gbasend-cli/target/release/gbasend"
    ```
+
+   The fork is `<https://github.com/tanweiken/gbasend-rs>` — upstream's
+   `nullstalgia/gbasend-rs` does not carry the SO handshake, so its nootloader
+   and speed test do not match the firmware in `firmware/`.
 
    Configure the plugin to find the resulting executable using `PATH`,
    `FLASHGBLINK_GBASEND`, or `FlashGBLinkGbasend` in FlashGBX's `settings.ini`.
@@ -239,19 +245,13 @@ $PY flash.py image Apotris.gba --boot
   rewrites everything without checking; `--no-verify` skips the read-back and
   records no state.
 - Each changed sector is erased, programmed in 4 KiB blocks using the profile's
-  buffered-write template, and verified. `--chip-erase` erases the whole chip
-  first for profiles that support it and have no usable sector map.
-- ROM and save reads use the payload's checked-read commands. A block whose
-  checksum does not match is retried; a persistent mismatch raises instead of
-  writing a suspect backup. An older payload falls back to unchecked reads
-  with a one-time warning.
+  buffered-write template, and verified.
 
 Options: `--port`, `--baud` (data phase SPI clock, default 1.25 MHz),
 `--upload-baud` (multiboot clock, default 256 kHz), `--config` (profile
 directory; default: autodetect FlashGBX's), `--profile` (profile name,
-skips autodetection), `--state` (delta state file), `--fallback-write`
-(allow writing a Burn2Slot-detected cart), `--chip-erase` (erase the whole
-chip instead of sectors), `FLASHGBLINK_CONFIG` (profile directory override),
+skips autodetection), `--state` (delta state file),
+`FLASHGBLINK_CONFIG` (profile directory override),
 `--gbasend`, `--payload`, `--verbose`.
 
 ## Use cases
@@ -263,22 +263,15 @@ chip instead of sectors), `FLASHGBLINK_CONFIG` (profile directory override),
 
 ## Saves
 
-`save` dumps SRAM at `0x0E000000` to a raw `.sav` that emulators can open;
-`restore` writes one back and reads it to confirm. The default is 64 KiB; use
-`--save-type sram-32k|sram-64k|sram-128k` or `--size BYTES` for another size.
-`restore` requires the file to match that size exactly, so a short file cannot
-leave the rest of the save stale.
+`save` dumps the save media at `0x0E000000` to a raw `.sav` that emulators can
+open; `restore` writes one back and reads it to confirm. Both take
+`--size BYTES` for a different save media size (default `0x10000`, 64 KiB).
 
 ```sh
 $PY flash.py save apotris.sav
-$PY flash.py save --save-type sram-32k old.sav
 $PY flash.py restore apotris.sav            # verified
 $PY flash.py restore old.sav --no-verify
 ```
-
-EEPROM (512 B / 8 KiB) and save-flash (64/128 KiB) are not supported. An
-attempt fails with an explicit error rather than producing a blank backup.
-See [`docs/cartridge-support.md`](docs/cartridge-support.md).
 
 The save bus is 8 bits wide, so the payload has byte-wide reads and writes
 (`0x5A70`/`0x5A80`) separate from the 16-bit cartridge path. A 16-bit load from
@@ -308,10 +301,7 @@ and a save that was never dumped is gone.
 ## Additional limitations
 
 - AGB cartridges only.
-- EEPROM and save-flash dump/restore are not implemented. RTC data is not read.
-- Cartridges with no matching FlashGBX profile can be found by a
-  Burn2Slot-style scan. Detection does not erase or program data; writing one
-  needs `--fallback-write` and should be treated as unverified.
+- EEPROM and save-flash writes are not implemented.
 - Profiles that require a cartridge power cycle abort with a prompt; power the
   GBA off and on holding START+SELECT, re-upload the payload and reconnect.
 - FlashGBX erases every sector in the image unless **Skip writing matching ROM
@@ -362,18 +352,14 @@ reached with the same commands.
 | Word | Meaning |
 |---|---|
 | `0x5A5A5A5A` | ping; reply is the current status |
-| `0x5A000C00` | abort: discard the installed write template until the next one |
-| `0x5ABE00` | capabilities: reply is `0x0001nnnn` (version 1, feature bits) |
 | `0x5A20nn` | write `nn` address/value pairs (two words per pair) |
 | `0x5A3000` | read: next words are address and count, then `count` dummies |
-| `0x5AC000` | checked read: like `0x5A3000`, then one checksum word |
-| `0x5A70nn` | read bytes: next words are address and byte count, then dummies |
-| `0x5AC100` | checked byte read: like `0x5A70`, then one checksum word |
 | `0x5A5000` | write block: next words are address and packed word count, then data |
 | `0x5AB000` | CRC32 job: next words are address and byte count; poll with pings until OK, then read the result |
 | `0x5AB100` | CRC32 result: next word is a dummy; its reply is the last job's CRC32 |
 | `0x5A0060nn` / `0x5A0160nn` | draw `nn`% on the write (green) / verify (cyan) bar |
 | `0x5AA000` | show the FLASH COMPLETE / RESTART GBA TO PLAY screen |
+| `0x5A7000` | read bytes: next words are address and byte count, then dummies |
 | `0x5A8000` | write bytes: next words are address and byte count, then packed data |
 | `0x5A40nn` | soft reset into the cartridge |
 | `0x5A9000` | install a write template: chunk bytes, command count, then 4 words per command |
@@ -389,12 +375,9 @@ otherwise that bank stays in status-register mode and reads return `0x0080`.
 The profile's `reset_every` moves the reset to each bank boundary, and every
 sector is reset at its own address before erase and programming.
 
-The buffered-write count field depends on the command set: Intel `E8` takes
-**bytes minus one** (63 for 64 bytes), while AMD `25h`/`26h` takes **words
-minus one** (31 for 64 bytes). The host encodes the correct value for the
-profile's `BS` token. AMD data polling is only valid at the last word loaded
-into the write buffer, so a `PD` wait polls that word rather than the sector
-address.
+The buffered-write count field is **bytes minus one** (63 for 64 bytes). The
+payload substitutes the profile's `BS` token with the configured write window,
+so Intel `E8` and AMD `0x26` profiles share the same code.
 
 Profile wait tables are executed after each command, not only at the end of a
 sequence: some parts poll the status register after the first unlock write, and
@@ -416,10 +399,9 @@ Run the hardware-free tests:
 .venv/bin/python3 -m unittest discover -s tests
 ```
 
-The suite covers the word protocol, checked reads with fault injection, CFI
-decoding, write-plan encoding, the FlashGBLink device emulation, FlashGBX
-`Flashcart` detection through the adapter, Burn2Slot fallback detection, chip
-erase, and the progress-bar phase logic.
+The suite covers the word protocol, CFI decoding, write-plan encoding, the
+FlashGBLink device emulation, FlashGBX `Flashcart` detection through the
+adapter, and the progress-bar phase logic.
 
 ## Roadmap
 
