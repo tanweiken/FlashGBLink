@@ -15,15 +15,16 @@ devices. A small payload boots into GBA RAM over the BIOS multiboot link, then
 bridges the Pico to the cartridge. During a write, the console shows live green
 write and cyan verification progress, then a completion screen.
 
-> **Experimental performance branch.** The
-> [`performance`](https://github.com/tanweiken/FlashGBLink/tree/performance)
-> branch (plugin `0.3.0b1`) paces the link port by the GBA's SO ready line. On
-> the tested cartridge it reads **3.6× faster** (4 MiB in 45 s instead of
-> 160 s) and writes **2.7–2.8× faster** (verified 4 MiB in 2:13 instead of
-> 6:03), but it needs its own payload, UF2 images and a forked `gbasend` from
+> **Experimental performance branch (plugin `0.3.0b1`).** This line paces the
+> link port by the GBA's SO ready line instead of a fixed per-word delay. On the
+> tested 32 MiB cartridge it reads 3.6× faster and does a verified 4 MiB write
+> 2.7–2.8× faster than the `main` release (see
+> [`docs/hardware-baseline.md`](docs/hardware-baseline.md)). It needs the
+> matching `gbasend` from
 > [tanweiken/gbasend-rs](https://github.com/tanweiken/gbasend-rs) commit
-> `a1257e4`. `main` stays on the 0.2.2 release, which works with upstream
-> `nullstalgia/gbasend-rs`.
+> `a1257e4`, and the UF2 images in `firmware/` are built from that commit —
+> payload, plugin and firmware must come from this branch together. `main`
+> stays on the 0.2.2 release for the upstream-compatible setup.
 
 ## Credits
 
@@ -40,7 +41,10 @@ there would be no link and no cartridge knowledge:
 - **[gbasend-rs](https://github.com/nullstalgia/gbasend-rs)** by **nullstalgia**
   (MIT OR Apache-2.0) — the RP2040 firmware, the USB↔SPI bridge, the multiboot
   upload protocol and the `gbasend` CLI. The prebuilt UF2s in `firmware/` are
-  unmodified copies. The entire Pico/link/upload layer is theirs.
+  built from
+  [tanweiken/gbasend-rs](https://github.com/tanweiken/gbasend-rs) commit
+  `a1257e4`, a fork of that project which adds the SO ready-line handshake. The
+  entire Pico/link/upload layer is theirs.
 
 This project adds the GBA-side payload (16-bit and byte-wide cartridge access,
 the profile-driven write-template engine, the two progress bars and the soft
@@ -88,13 +92,18 @@ VCC.** Wiring: Pico GP0 → GBA SO, GP2 → GBA SC, GP3 → GBA SI, and GND, wit
 
 3. **Build `gbasend`.** The plugin uses this small Rust command-line tool to
    upload the payload to the GBA over USB and the Pico. It is not bundled in the
-   plugin archive; build it once:
+   plugin archive; build the fork this branch is validated against, once:
 
    ```sh
-   git clone https://github.com/nullstalgia/gbasend-rs
+   git clone https://github.com/tanweiken/gbasend-rs
+   git -C gbasend-rs checkout a1257e4
    cargo build --release --manifest-path gbasend-rs/gbasend-cli/Cargo.toml
    GBASEND="$PWD/gbasend-rs/gbasend-cli/target/release/gbasend"
    ```
+
+   The fork is `<https://github.com/tanweiken/gbasend-rs>` — upstream's
+   `nullstalgia/gbasend-rs` does not carry the SO handshake, so its nootloader
+   and speed test do not match the firmware in `firmware/`.
 
    Configure the plugin to find the resulting executable using `PATH`,
    `FLASHGBLINK_GBASEND`, or `FlashGBLinkGbasend` in FlashGBX's `settings.ini`.

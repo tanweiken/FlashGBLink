@@ -1,9 +1,10 @@
 # gbasend-pico firmware
 
-Prebuilt RP2040 UF2 images from
-[nullstalgia/gbasend-rs](https://github.com/nullstalgia/gbasend-rs), commit
-`a72da50` (2026-11-02), plus the local SO flow-control change described below
-(not yet upstream), built and copied in on 2026-11-03.
+Prebuilt RP2040 UF2 images built from
+[tanweiken/gbasend-rs](https://github.com/tanweiken/gbasend-rs) commit
+`a1257e4` (2026-11-03), a fork of
+[nullstalgia/gbasend-rs](https://github.com/nullstalgia/gbasend-rs) at `a72da50`
+that adds the SO ready-line handshake described below.
 
 | File | Use |
 |---|---|
@@ -73,16 +74,16 @@ same time.
 ## Rebuilding
 
 ```sh
-git clone https://github.com/nullstalgia/gbasend-rs
+git clone https://github.com/tanweiken/gbasend-rs
+git -C gbasend-rs checkout a1257e4
 cd gbasend-rs/gbasend-pico
 cargo build --release
 picotool uf2 convert target/thumbv6m-none-eabi/release/gbasend-pico \
   -t elf gbasend-pico.uf2
 ```
 
-The bundled images also need the SO flow-control working tree change on top of
-the commit above; a stock `a72da50` build does not read SO and will pace words
-with the fixed delay.
+Upstream `nullstalgia/gbasend-rs` at `a72da50` does not read SO and paces every
+word with the fixed delay, so it will not reproduce these images.
 
 ## License
 
