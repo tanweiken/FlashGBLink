@@ -331,6 +331,34 @@ The wider margins cost about 13 µs per word against the 2 µs / 5 µs build
 `0.3.0b4` makes 1.8 Mbaud the default for `flash.py` and the plugin; a lower
 FlashGBX baud setting, or `flash.py --baud 1250000`, clamps it back down.
 
+### Wider margins lose on the FlashGBX path
+
+Measured 2026-11-04 through FlashGBX, same cartridge and image:
+
+| Build | Margins | Clock | Throughput |
+|---|---|---|---|
+| `0.3.0b2` | 2 µs / 5 µs | 1.25 Mbaud | **42–45 KiB/s** |
+| `0.3.0b4` | 5 µs / 20 µs | 1.8 Mbaud | 39–40 KiB/s |
+
+The absolute numbers are about half the CLI's (the FlashGBX path adds its own
+round trips), but the direction matches the CLI table above: the 20 µs settle
+costs ~13 µs per word and the 1.8 Mbaud clock recovers only ~6 µs of it, so a
+build with the wider margins cannot beat the 2 µs / 5 µs one on this link.
+
+1.8 Mbaud was worth measuring but is not worth defaulting to. `0.3.0b5` goes back
+to the `2 µs / 5 µs` firmware (`a1257e4`, images `d3d7021` / `c2ab260`) and the
+1.25 Mbaud default, which is the configuration behind the 42–45 KiB/s figure and
+the one every end-to-end run in this document used. The wider-margin images
+remain the choice only if a clock above 1.25 Mbaud is needed for some other
+reason; on this hardware it buys less than it costs.
+
+Why the margins were widened at all: the gbasend *speed-test ROM* has a heavy
+per-word handler and mismatched above ~1 MHz with the 2 µs / 5 µs margins. The
+FlashGBLink payload asserts SO within a couple of instructions of the last clock,
+so the tighter margins held at 1.25 Mbaud through every run recorded here — but
+1.25 Mbaud is the ceiling they are known to be safe at, and `0.3.0b5` does not
+raise the default.
+
 The 4 MiB write includes erase, program and verify, so it cannot be split from
 this run; verify alone accounts for a read's worth of the 133 s. FlashGBX's 2:22
 is its own elapsed-time readout for the same operation and within 7% of the CLI,
