@@ -17,13 +17,16 @@ write and cyan verification progress, then a completion screen.
 
 > **Experimental performance branch.** The
 > [`performance`](https://github.com/tanweiken/FlashGBLink/tree/performance)
-> branch (plugin `0.3.0b1`) paces the link port by the GBA's SO ready line. On
-> the tested cartridge it reads **3.6× faster** (4 MiB in 45 s instead of
-> 160 s) and writes **2.7–2.8× faster** (verified 4 MiB in 2:13 instead of
-> 6:03), but it needs its own payload, UF2 images and a forked `gbasend` from
-> [tanweiken/gbasend-rs](https://github.com/tanweiken/gbasend-rs) commit
-> `a1257e4`. `main` stays on the 0.2.2 release, which works with upstream
-> `nullstalgia/gbasend-rs`.
+> branch paces the link port by the GBA's SO ready line instead of a fixed
+> per-word delay. On the tested cartridge it reads roughly 3–4× faster and
+> writes a verified image roughly 2.5–3× faster than this branch; the current
+> figures are in that branch's
+> [`docs/hardware-baseline.md`](https://github.com/tanweiken/FlashGBLink/blob/performance/docs/hardware-baseline.md).
+> It is a matched set: payload, plugin and Pico firmware all come from that
+> branch, plus the `gbasend` from
+> [tanweiken/gbasend-rs](https://github.com/tanweiken/gbasend-rs) that its
+> `firmware/README.md` pins. This branch (`main`) stays on its stable release
+> line and works with upstream `nullstalgia/gbasend-rs`.
 
 ## Credits
 
