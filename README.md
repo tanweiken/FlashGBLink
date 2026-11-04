@@ -15,18 +15,17 @@ devices. A small payload boots into GBA RAM over the BIOS multiboot link, then
 bridges the Pico to the cartridge. During a write, the console shows live green
 write and cyan verification progress, then a completion screen.
 
-> **Experimental performance branch (plugin `0.3.0b5`).** This line paces the
-> link port by the GBA's SO ready line instead of a fixed per-word delay, and
-> carries the CRC32 delta work from `main` 0.2.3. On the tested 32 MiB
-> cartridge it reads 3.6× faster and does a verified 4 MiB write 2.7–2.8×
-> faster than the 0.2.2 release (see
-> [`docs/hardware-baseline.md`](docs/hardware-baseline.md)); the CRC32 diff and
-> verify remove the ROM read-back on top of that. It needs the matching
-> `gbasend` from
-> [tanweiken/gbasend-rs](https://github.com/tanweiken/gbasend-rs), and the UF2
-> images in `firmware/` are built from the fork's tight-margin commit
-> `a1257e4`; payload, plugin and firmware must come from this branch together.
-> `main` stays on the 0.2.3 release for the upstream-compatible setup.
+> **Experimental performance branch.** This line paces the link port by the
+> GBA's SO ready line instead of a fixed per-word delay, and carries the CRC32
+> delta work from `main`. Against the 0.2.2 release it read 3.6× faster and
+> wrote a verified 4 MiB image 2.7–2.8× faster; current figures, and the
+> b1–b5 timing history, are in
+> [`docs/hardware-baseline.md`](docs/hardware-baseline.md). It needs the
+> matching `gbasend` from
+> [tanweiken/gbasend-rs](https://github.com/tanweiken/gbasend-rs), and the
+> payload, plugin and UF2 images in `firmware/` must all come from this branch
+> — `firmware/README.md` pins the firmware commit. `main` stays the
+> upstream-compatible release line.
 
 ## Credits
 
