@@ -161,6 +161,19 @@ class FramingTests(unittest.TestCase):
         self.assertEqual(link.sent[0][0] & 0xFF, 100)
 
 
+class WriteTimeoutTests(unittest.TestCase):
+    def test_block_timeout_is_reported_as_a_cartridge_failure(self):
+        class TimeoutLink(RecordingLink):
+            def ping(self, timeout=5.0):
+                return flash.ST_TIMEOUT
+
+        link = TimeoutLink()
+        with self.assertRaises(flash.TransferError) as caught:
+            flash.write_block(link, 0x1BE000, b"\x00" * 64)
+        self.assertIn("0x1BE000", str(caught.exception))
+        self.assertIn("did not become ready", str(caught.exception))
+
+
 class AbortTests(unittest.TestCase):
     def test_abort_frames_the_opcode_and_a_ping(self):
         link = RecordingLink()

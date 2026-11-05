@@ -651,7 +651,22 @@ class GbxDevice(LK_Device):
                 skipped = True
                 continue
             skipped = False
-            self._program_at(address + offset, chunk)
+            try:
+                self._program_at(address + offset, chunk)
+            except ProtocolError as error:
+                # FlashGBX expects WriteROM to return False so its worker can
+                # retry from the sector start. Letting the exception escape
+                # aborts the whole GUI with an "unresolvable error".
+                dprint("FlashGBLink: write failed at 0x%X: %s"
+                       % (address + offset, error))
+                self.SKIPPING = False
+                self._plan_key = None
+                self.ERROR_ARGS = {"iteration": 0}
+                try:
+                    self.LINK.abort()
+                except Exception:
+                    pass
+                return False
             if (rumble_stop and flash_buffer_size
                     and (offset + length) % flash_buffer_size == 0):
                 self._cart_write(address=0xC4, value=0x00, flashcart=True)

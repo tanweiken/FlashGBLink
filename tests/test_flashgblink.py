@@ -295,6 +295,18 @@ class AdapterTests(unittest.TestCase):
         self.device._write(bytearray([0xFF] * 64), wait=True)
         self.assertEqual(self.device.LINK.blocks[-1][0], 64)
 
+    def test_write_rom_returns_false_so_flashgbx_can_retry(self):
+        def fail(_address, _data):
+            raise self.device_module.ProtocolError("simulated block failure")
+
+        self.device._program_at = fail
+        try:
+            result = self.device.WriteROM(0, bytes(range(64)), max_length=64)
+        finally:
+            pass
+        self.assertFalse(result)
+        self.assertEqual(self.device.ERROR_ARGS, {"iteration": 0})
+
     def test_write_rom_stops_between_blocks_when_cancelled(self):
         self.device.CANCEL = True
         try:

@@ -583,7 +583,20 @@ def write_block(link, address, data, timeout=30.0):
             status = link.ping(timeout=0.05)
         except ProtocolError:
             continue
-        if status == ST_BAD:
+        if status in (ST_BAD, ST_TIMEOUT):
+            # A rejected block may not have consumed its data words, and a
+            # timed-out program leaves the payload idle. Clock the recovery
+            # words before returning so the next command starts in frame.
+            try:
+                link.resync()
+            except Exception:
+                pass
+            if status == ST_TIMEOUT:
+                raise TransferError(
+                    "cartridge did not become ready while programming block "
+                    "at 0x%X (status 0x%08X); the block or sector is bad, "
+                    "locked, or the cart contacts are dirty"
+                    % (address, status))
             raise ProtocolError("payload rejected block write at 0x%X"
                                 % address)
         if (status & 0xFFFFFF00) == ST_OK:

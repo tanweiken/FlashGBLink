@@ -98,6 +98,10 @@ static u16 sim_vram[240u * 160u];
 #define ST_OK 0xA5A50000u
 #define ST_ECHO 0xA5A5E000u
 #define ST_BAD 0xA5A500E1u
+/* A flash command was issued but the status register never reached the
+ * expected value. Distinct from a malformed block, so the host can report a
+ * cartridge/programming failure instead of a protocol error. */
+#define ST_TIMEOUT 0xA5A500E2u
 /* Preloaded while a drawing command runs: the host polls for ST_OK and must
  * not accept the reply that was clocked in mid-draw as confirmation. */
 #define ST_BUSY 0xA5A50001u
@@ -365,7 +369,7 @@ static void plan_execute(u32 base, const u16 *words, u32 count)
 			wr16(addr, value);
 		}
 		if (!plan_wait(base, cmd, (u16)last)) {
-			reply = ST_BAD;
+			reply = ST_TIMEOUT;
 			return;
 		}
 	}
