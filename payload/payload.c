@@ -625,6 +625,10 @@ static void cmd_boot(void)
 static u32 write_percent = 0;
 static u32 verify_percent = 0;
 static u32 verify_started = 0;
+/* Set while the completion screen is up. The next progress update starts a
+ * new flash session and must rebuild the whole layout, not just overdraw the
+ * bars. */
+static u32 done_shown = 0;
 
 static void fill(u32 x, u32 y, u32 w, u32 h, u16 colour)
 {
@@ -784,6 +788,15 @@ static void screen_init(void)
 
 static void show_progress(u32 phase, u32 percent)
 {
+	if (done_shown) {
+		/* A new write started after "FLASH COMPLETE": clear the whole
+		 * screen so no part of the completion message survives. */
+		done_shown = 0;
+		write_percent = 0;
+		verify_percent = 0;
+		verify_started = 0;
+		screen_init();
+	}
 	if (percent > 100u)
 		percent = 100u;
 	if (phase == 0u) {
@@ -822,6 +835,7 @@ static void show_done(void)
 	draw_text_centered(60u, "FLASH COMPLETE", 2u, COL_WRITE);
 	draw_check(109u, 84u, COL_WRITE);
 	draw_text_centered(112u, "RESTART GBA TO PLAY", 1u, COL_TEXT);
+	done_shown = 1u;
 }
 
 static void dispatch(u32 hdr)

@@ -103,6 +103,17 @@ class PayloadSimTests(unittest.TestCase):
         out = self.run_frames([plan, abort, block])
         self.assertEqual(out[2][3], flash.ST_BAD)
 
+    def test_progress_after_done_reinitialises_the_screen(self):
+        # A second flash must not leave the completion screen behind.
+        source = ROOT / "tests" / "sim" / "screen_reset.c"
+        binary = Path(self.tmp.name) / "screen_reset"
+        subprocess.run(
+            ["cc", "-O1", "-I", str(ROOT), "-o", str(binary), str(source)],
+            check=True, capture_output=True)
+        result = subprocess.run([str(binary)], capture_output=True)
+        self.assertEqual(result.returncode, 0,
+                         result.stdout.decode() + result.stderr.decode())
+
     def test_amd_data_polling_uses_the_last_loaded_word(self):
         # AMD data polling is only valid at the last word loaded into the
         # write buffer, not at the profile's SA/PA wait address.  This
