@@ -16,8 +16,9 @@ bridges the Pico to the cartridge. During a write, the console shows live green
 write and cyan verification progress, then a completion screen.
 
 > **Experimental performance branch.** This line paces the link port by the
-> GBA's SO ready line instead of a fixed per-word delay, and carries the CRC32
-> delta work from `main`. Against the 0.2.2 release it read 3.6× faster and
+> GBA's SO ready line instead of a fixed per-word delay, and carries the 0.2.4
+> safety fixes (checked reads, AMD writes, timeout retries and the
+> completion-screen reset). Against the 0.2.2 baseline it read 3.6× faster and
 > wrote a verified 4 MiB image 2.7–2.8× faster; current figures, and the
 > b1–b5 timing history, are in
 > [`docs/hardware-baseline.md`](docs/hardware-baseline.md). It needs the

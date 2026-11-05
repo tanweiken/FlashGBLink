@@ -402,6 +402,13 @@ before that was the same plugin running against a Pico still carrying the
 | wide `b68a37d` | 1.25 Mbaud | ~37 KiB/s |
 | wide `b68a37d` | 1.8 Mbaud | 39–40 KiB/s |
 
+The `performance` branch was rebased onto `main` 0.2.4 on 2026-11-05. A build
+from the rebased branch is 6672 bytes, sha256
+`9d4e85fef9f074ecefbb80dd15d362276ec29edce6877f8218ad7577b6e4bd84`
+(the SO flow control plus checked reads, the AMD write fix, programming-timeout
+retries and the completion-screen reset). The b1–b5 numbers above remain the
+measurements from their original payloads.
+
 
 
 The 4 MiB write includes erase, program and verify, so it cannot be split from
