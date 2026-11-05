@@ -325,7 +325,8 @@ static void cmd_crc_get(void)
 	reply = ST_OK;
 }
 
-static int plan_wait(u32 base, const struct write_cmd *cmd, u16 last)
+static int plan_wait(u32 base, const struct write_cmd *cmd, u16 last,
+		     u32 last_addr)
 {
 	u32 addr;
 	u32 spins = 0;
@@ -333,9 +334,17 @@ static int plan_wait(u32 base, const struct write_cmd *cmd, u16 last)
 
 	if (cmd->wait_kind == WAIT_NONE)
 		return 1;
-	addr = cmd->wait_kind == WAIT_ABS ? cmd->wait_addr
-					  : base + cmd->wait_addr;
-	expected = cmd->wait_kind == WAIT_PD ? last : (u16)cmd->wait_exp;
+	if (cmd->wait_kind == WAIT_PD) {
+		/* AMD data polling is only valid at the last word loaded into
+		 * the write buffer.  The profile's wait address is the sector
+		 * or program address, not the end of the data block. */
+		addr = last_addr;
+		expected = last;
+	} else {
+		addr = cmd->wait_kind == WAIT_ABS ? cmd->wait_addr
+						  : base + cmd->wait_addr;
+		expected = (u16)cmd->wait_exp;
+	}
 	while (++spins < 20000000u) {
 		u16 value = rd16(addr);
 
@@ -349,6 +358,7 @@ static void plan_execute(u32 base, const u16 *words, u32 count)
 {
 	u32 i;
 	u32 last = 0;
+	u32 last_addr = 0;
 
 	for (i = 0; i < plan_count; i++) {
 		const struct write_cmd *cmd = &plan[i];
@@ -361,14 +371,12 @@ static void plan_execute(u32 base, const u16 *words, u32 count)
 			for (j = 0; j < count; j++) {
 				wr16(addr + j * 2u, words[j]);
 				last = words[j];
+				last_addr = addr + j * 2u;
 			}
 		} else {
-			u16 value = cmd->val_kind == VAL_BS
-				  ? (u16)(plan_chunk - 1u) : (u16)cmd->val;
-
-			wr16(addr, value);
+			wr16(addr, (u16)cmd->val);
 		}
-		if (!plan_wait(base, cmd, (u16)last)) {
+		if (!plan_wait(base, cmd, (u16)last, last_addr)) {
 			reply = ST_TIMEOUT;
 			return;
 		}
@@ -391,7 +399,7 @@ static void set_default_plan(void)
 	cmd[1].addr_kind = ADDR_SA;
 	cmd[1].addr = 0;
 	cmd[1].val_kind = VAL_BS;
-	cmd[1].val = 0;
+	cmd[1].val = plan_chunk - 1u;
 	cmd[1].wait_kind = WAIT_NONE;
 
 	cmd[2].addr_kind = ADDR_PA;

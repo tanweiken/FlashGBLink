@@ -378,9 +378,12 @@ otherwise that bank stays in status-register mode and reads return `0x0080`.
 The profile's `reset_every` moves the reset to each bank boundary, and every
 sector is reset at its own address before erase and programming.
 
-The buffered-write count field is **bytes minus one** (63 for 64 bytes). The
-payload substitutes the profile's `BS` token with the configured write window,
-so Intel `E8` and AMD `0x26` profiles share the same code.
+The buffered-write count field depends on the command set: Intel `E8` takes
+**bytes minus one** (63 for 64 bytes), while AMD `25h`/`26h` takes **words
+minus one** (31 for 64 bytes). The host encodes the correct value for the
+profile's `BS` token. AMD data polling is only valid at the last word loaded
+into the write buffer, so a `PD` wait polls that word rather than the sector
+address.
 
 Profile wait tables are executed after each command, not only at the end of a
 sequence: some parts poll the status register after the first unlock write, and

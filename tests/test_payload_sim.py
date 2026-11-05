@@ -103,6 +103,18 @@ class PayloadSimTests(unittest.TestCase):
         out = self.run_frames([plan, abort, block])
         self.assertEqual(out[2][3], flash.ST_BAD)
 
+    def test_amd_data_polling_uses_the_last_loaded_word(self):
+        # AMD data polling is only valid at the last word loaded into the
+        # write buffer, not at the profile's SA/PA wait address.  This
+        # compiles the real payload against a small polling model.
+        source = ROOT / "tests" / "sim" / "amd_wait.c"
+        binary = Path(self.tmp.name) / "amd_wait"
+        subprocess.run(
+            ["cc", "-O1", "-I", str(ROOT), "-o", str(binary), str(source)],
+            check=True, capture_output=True)
+        result = subprocess.run([str(binary)], capture_output=True)
+        self.assertEqual(result.returncode, 0,
+                         result.stdout.decode() + result.stderr.decode())
 
 
 if __name__ == "__main__":

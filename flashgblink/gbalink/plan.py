@@ -33,11 +33,17 @@ def _addr_token(token):
     raise PlanError("unknown address token %r" % (token,))
 
 
-def _val_token(token):
+def _val_token(token, buffer_size=None, command_set=""):
     if isinstance(token, int):
         return VAL_CONST, token & 0xFFFF
     if token == "BS":
-        return VAL_BS, 0
+        # Intel E8 takes the byte count minus one; AMD 25h takes the word
+        # count minus one.  The payload uses the value verbatim.
+        if buffer_size is None:
+            return VAL_BS, 0
+        if str(command_set).upper() == "AMD":
+            return VAL_BS, max(0, buffer_size // 2 - 1)
+        return VAL_BS, max(0, buffer_size - 1)
     if token == "PD":
         return VAL_PD, 0
     raise PlanError("unknown data token %r" % (token,))
@@ -122,7 +128,7 @@ def encode_write_plan(commands, buffer_size=None, command_set="",
         if len(row) < 2:
             raise PlanError("malformed %s command %r" % (key, row))
         addr_kind, address = _addr_token(row[0])
-        val_kind, value = _val_token(row[1])
+        val_kind, value = _val_token(row[1], buffer_size, command_set)
         if val_kind == VAL_PD:
             data_markers += 1
         wait_kind, wait_address, expected, mask = _wait_word(

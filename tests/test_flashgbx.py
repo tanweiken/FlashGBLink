@@ -77,6 +77,7 @@ class WritePlanTests(unittest.TestCase):
         self.assertEqual(words[1] >> 30, flash.VAL_CONST)
         self.assertEqual(words[1] & 0xFFFF, 0xE8)
         self.assertEqual(words[5] >> 30, flash.VAL_BS)       # SA, BS
+        self.assertEqual(words[5] & 0xFFFF, 63)              # Intel: bytes - 1
         self.assertEqual(words[8] >> 30, flash.ADDR_PA)      # PA, PD
         self.assertEqual(words[9] >> 30, flash.VAL_PD)
         self.assertEqual(words[13] & 0xFFFF, 0xD0)
@@ -93,6 +94,7 @@ class WritePlanTests(unittest.TestCase):
         self.assertEqual(words[5] & 0xFFFF, 0x56)
         self.assertEqual(words[8] >> 30, flash.ADDR_SA)
         self.assertEqual(words[9] & 0xFFFF, 0x26)
+        self.assertEqual(words[13] & 0xFFFF, 15)             # AMD: words - 1
         # The wait after 0x2A compares the read-back value with the last
         # programmed word (PD), which the payload substitutes.
         self.assertEqual(words[22] >> 30, flash.WAIT_PD)
