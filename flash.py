@@ -19,28 +19,33 @@ https://github.com/nullstalgia/gbasend-rs.
 """
 
 import argparse
+import copy
 import hashlib
 import json
 import os
 import shutil
-import struct
+import signal
 import subprocess
 import sys
 import time
 import zlib
 from pathlib import Path
 
-from flashgbx import (ProfileError, ProtocolError, cfi_sector_regions,
-                      find_config_dir, find_profile, load_profiles,
-                      normalize_cfi, parse_cfi, relocate_commands, swap_bits)
-from flashgblink.gbalink import (ADDR_ABS, ADDR_PA, ADDR_SA, BLOCK_BYTES, HDR_MAGIC,
-                     OP_BOOT, OP_CRC32, OP_CRC_GET, OP_DONE, OP_PROGRESS, OP_READ, OP_READ8,
+from flashgbx import (Profile, ProfileError, ProtocolError,
+                      cfi_sector_regions, find_config_dir, find_profile,
+                      load_profiles, normalize_cfi, parse_cfi,
+                      relocate_commands, swap_bits)
+from flashgblink.gbalink import (ADDR_ABS, ADDR_PA, ADDR_SA, BLOCK_BYTES,
+                     CAP_READ_CHECK, CAPS_VERSION, HDR_MAGIC,
+                     OP_ABORT, OP_BOOT, OP_CAPS, OP_CRC32, OP_CRC_GET, OP_DONE, OP_PROGRESS, OP_READ, OP_READ8,
+                     OP_READ8_CHECK, OP_READ_CHECK,
                      OP_SET_PLAN, OP_WRITE8, OP_WRITE_BLOCK, OP_WRITE_SEQ, PAYLOAD,
-                     PING, PLAN_MAX_COMMANDS, RESYNC_WORDS, ST_BAD, ST_OK,
+                     PING, PLAN_MAX_COMMANDS, RESYNC_WORDS, ST_BAD, ST_ECHO,
+                     ST_OK, ST_TIMEOUT,
                      VAL_BS, VAL_CONST, VAL_PD, WAIT_ABS, WAIT_NONE, WAIT_PD,
                      WAIT_SA, Link, PlanError, TransferError, UnsupportedCommand,
                      _check_status, _hex, _pack_words, done, find_port, progress,
-                     read_region, single_write_waits, write_block)
+                     read_bytes, read_region, single_write_waits, write_block)
 from flashgblink.gbalink.plan import encode_write_plan as plan_encode_write_plan
 from flashgblink.gbalink.plan import prepare_write as plan_prepare_write
 
@@ -58,13 +63,16 @@ CFI_BYTES = 0x400
 # -- cartridge operations -----------------------------------------------------
 
 def _read_bytes(link, address, length):
-    words = link.read_words(address, (length + 3) // 4)
-    return struct.pack("<%dI" % len(words), *words)[:length]
+    return read_region(link, address, length)
 
 
 def _reset_pairs(profile, address):
     if profile is None:
         return [(address, 0x50), (address, 0xFF)]
+    if profile.spec.get("synthetic"):
+        # Burn2Slot's sequences already carry the exact unlock addresses;
+        # moving them to the sector address would change the sequence.
+        return [(row[0], row[1]) for row in profile.command("reset")]
     rows = relocate_commands(profile.command("reset"), address)
     return [(row[0], row[1]) for row in rows]
 
@@ -240,6 +248,21 @@ def sector_erase(link, address, profile=None, timeout=30.0):
     return True
 
 
+def chip_erase(link, profile, timeout=300.0):
+    """Erase the whole chip with the profile's chip-erase commands."""
+    if profile is None or not profile.has_command("chip_erase"):
+        raise ProfileError("the selected profile has no chip-erase command")
+    rows = profile.command("chip_erase")
+    waits = profile.command("chip_erase_wait_for")
+    _run_sequence(link, rows, waits, 0, timeout=timeout)
+    cart_reset(link, profile, address=0)
+    value = link.read_words(0, 1)[0] & 0xFFFF
+    if value != 0xFFFF:
+        raise ProtocolError(
+            "chip erase completed but the cartridge reads 0x%04X" % value)
+    return True
+
+
 def single_write(link, address, value, profile=None, timeout=10.0):
     if profile is None:
         pairs = [(address, 0x70), (address, 0x10), (address, value)]
@@ -265,7 +288,7 @@ class Detection:
     """Result of matching a cartridge against the loaded profiles."""
 
     def __init__(self, profile=None, flash_id=None, cfi=None, candidates=None,
-                 ambiguous=False, baseline=None, id_buffer=None):
+                 ambiguous=False, baseline=None, id_buffer=None, method=None):
         self.profile = profile
         self.flash_id = flash_id
         self.cfi = cfi
@@ -273,6 +296,7 @@ class Detection:
         self.ambiguous = ambiguous
         self.baseline = baseline
         self.id_buffer = id_buffer
+        self.method = method
 
 
 def _flashcart(profile, link, verbose=False):
@@ -331,7 +355,226 @@ def _cfi_matches(profile, cfi):
     return True
 
 
-def detect(link, profiles, verbose=False):
+# -- Burn2Slot fallback detection -------------------------------------------
+#
+# Not every cart has a FlashGBX profile, and some boards scramble the address
+# or data lines. Burn2Slot (MIT, vrodin) finds those chips by trying the six
+# common AMD unlock layouts and six data wirings. This is a Python port of the
+# scan in Cart Doctor's web/gba_flash.js, which in turn came from that work.
+
+B2S_SEQS = [
+    [0x555, 0x2AA, 0x555, 0x555, 0x2AA, 0x555],
+    [0xAAA, 0x555, 0xAAA, 0xAAA, 0x555, 0xAAA],
+    [0xAAA, 0x554, 0xAAA, 0xAAA, 0x554, 0xAAA],
+    [0x5555, 0x2AAA, 0x5555, 0x5555, 0x2AAA, 0x5555],
+    [0xAAAA, 0x5554, 0xAAAA, 0xAAAA, 0x5554, 0xAAAA],
+    [0x1554, 0xAAA, 0x1554, 0x1554, 0xAAA, 0x1554],
+]
+B2S_BUS1 = [15, 7, 14, 6, 13, 5, 12, 4, 0, 8, 1, 9, 2, 10, 3, 11]
+B2S_BUS2 = [0, 8, 1, 9, 6, 14, 7, 15, 2, 10, 3, 11, 4, 12, 5, 13]
+B2S_WIRING_NAMES = [
+    "straight", "D0/D1 swapped", "data lines reordered (type 1)",
+    "data lines reordered (type 2)", "8-bit, doubled",
+    "8-bit, doubled, D0/D1 swapped",
+]
+
+
+def _b2s_swap_to(bus, value):
+    result = 0
+    for bit in range(16):
+        result |= ((value >> bit) & 1) << bus[bit]
+    return result
+
+
+def _b2s_swap_from(bus, value):
+    result = 0
+    for bit in range(16):
+        result |= ((value >> bus[bit]) & 1) << bit
+    return result
+
+
+def _b2s_out(bus, value):
+    value &= 0xFFFF
+    if bus == 1:
+        return swap_bits(value, (0, 1))
+    if bus == 2:
+        return _b2s_swap_to(B2S_BUS1, value)
+    if bus == 3:
+        return _b2s_swap_to(B2S_BUS2, value)
+    if bus == 4:
+        return ((value << 8) | value) & 0xFFFF
+    if bus == 5:
+        return swap_bits(((value << 8) | value) & 0xFFFF, (0, 1))
+    return value
+
+
+def _b2s_in(bus, value):
+    value &= 0xFFFF
+    if bus in (1, 5):
+        return swap_bits(value, (0, 1))
+    if bus == 2:
+        return _b2s_swap_from(B2S_BUS1, value)
+    if bus == 3:
+        return _b2s_swap_from(B2S_BUS2, value)
+    return value
+
+
+def _b2s_amd_spec(sequence, bus, cfi, flash_id):
+    addresses = [word * 2 for word in B2S_SEQS[sequence]]
+    out = lambda value: _b2s_out(bus, value)
+    spec = {
+        "type": "AGB",
+        "names": ["AMD-style flash, %s (Burn2Slot detection)"
+                  % B2S_WIRING_NAMES[bus]],
+        "command_set": "AMD",
+        "synthetic": True,
+        "flash_ids": [list(flash_id)],
+        "commands": {
+            "reset": [[addresses[0], out(0xAA)],
+                      [addresses[1], out(0x55)],
+                      [addresses[2], out(0xF0)]],
+            "read_identifier": [[addresses[0], out(0xAA)],
+                                [addresses[1], out(0x55)],
+                                [addresses[2], out(0x90)]],
+            "sector_erase": [[addresses[0], out(0xAA)],
+                             [addresses[1], out(0x55)],
+                             [addresses[2], out(0x80)],
+                             [addresses[3], out(0xAA)],
+                             [addresses[4], out(0x55)],
+                             ["SA", out(0x30)]],
+            "sector_erase_wait_for": [
+                [None, None, None], [None, None, None], [None, None, None],
+                [None, None, None], [None, None, None], ["SA", 0xFFFF, 0xFFFF]],
+            "single_write": [[addresses[0], out(0xAA)],
+                             [addresses[1], out(0x55)],
+                             [addresses[2], out(0xA0)],
+                             ["PA", "PD"]],
+            "single_write_wait_for": [
+                [None, None, None], [None, None, None],
+                [None, None, None], [None, None, None]],
+        },
+    }
+    regions = [list(row) for row in cfi_sector_regions(cfi)] if cfi else []
+    if regions:
+        spec["sector_size"] = regions
+        spec["flash_size"] = cfi["size"]
+    else:
+        # No usable CFI sector table: erase in 64 KiB steps like Burn2Slot.
+        # A larger real sector may be erased twice, which is harmless before
+        # programming starts. The count covers the GBA's 32 MiB window;
+        # sector_map stops at the image length, and total_size stays unknown
+        # unless the chip size was reported.
+        spec["sector_size"] = [[0x10000, 0x200]]
+        if cfi:
+            spec["flash_size"] = cfi["size"]
+    return spec
+
+
+def _b2s_intel_spec(profiles, flash_id, cfi):
+    generic = None
+    for profile in profiles:
+        if profile.path is not None and \
+                profile.path.stem == "fc_AGB_Generic_0_90":
+            generic = profile
+            break
+    if generic is None:
+        return None
+    spec = copy.deepcopy(generic.spec)
+    spec["names"] = ["Intel-style flash (Burn2Slot detection)"]
+    spec["synthetic"] = True
+    spec["flash_ids"] = [list(flash_id)]
+    if cfi:
+        spec["flash_size"] = cfi["size"]
+        regions = [list(row) for row in cfi_sector_regions(cfi)]
+        if regions:
+            spec["sector_size"] = regions
+    return spec
+
+
+def _fallback_detect(link, profiles, verbose=False):
+    original = _read_bytes(link, 0, 4)
+
+    # Intel-style chips are tried first, as Burn2Slot does; their reset is a
+    # single 0xFF and the ID command is harmless on most other carts.
+    try:
+        link.write_seq([(0, 0xFF), (0, 0x50), (0, 0x90)])
+        intel_id = _read_bytes(link, 0, 4)
+        link.write_seq([(0, 0xFF)])
+    except ProtocolError:
+        intel_id = b""
+    if len(intel_id) == 4 and intel_id != original:
+        maker = intel_id[0] | (intel_id[1] << 8)
+        device = intel_id[2] | (intel_id[3] << 8)
+        if (device in (0x8902, 0x8904, 0x887D, 0x887E)
+                or (device >> 8) == 0x88
+                or (device == 0xB0 and maker == 0xB0)
+                or maker == 0x1C):
+            cfi = None
+            spec = _b2s_intel_spec(profiles, intel_id, None)
+            if spec is not None:
+                profile = Profile(spec)
+                try:
+                    cfi = read_cfi(link, profile)
+                except ProtocolError:
+                    cfi = None
+                if cfi:
+                    profile = Profile(_b2s_intel_spec(profiles, intel_id, cfi))
+                if verbose:
+                    print("Burn2Slot: Intel-style ID %s"
+                          % intel_id.hex(" ").upper())
+                return Detection(profile=profile, flash_id=intel_id, cfi=cfi,
+                                 candidates=[profile], id_buffer=intel_id,
+                                 method="Burn2Slot Intel scan")
+
+    for sequence in range(len(B2S_SEQS)):
+        for bus in range(6):
+            out = lambda value: _b2s_out(bus, value)
+            resets = [(0, _b2s_out(wiring, 0xF0)) for wiring in range(6)]
+            unlock = [
+                (B2S_SEQS[sequence][0] * 2, out(0xAA)),
+                (B2S_SEQS[sequence][1] * 2, out(0x55)),
+                (B2S_SEQS[sequence][2] * 2, out(0x90)),
+            ]
+            try:
+                link.write_seq(resets)
+                link.write_seq(unlock)
+                raw = _read_bytes(link, 0, 4)
+                link.write_seq([(0, out(0xF0))])
+            except ProtocolError:
+                continue
+            if len(raw) < 4 or raw == original:
+                continue
+            device = _b2s_in(bus, raw[2] | (raw[3] << 8))
+            if not ((device >> 8) == 0x22 or device in (0x7E7E, 0x57, 0xF8)):
+                continue
+
+            cfi = None
+            try:
+                link.write_seq([(0, out(0x50)), (0, out(0xFF)),
+                                (0xAA, out(0x98))])
+                encoded = _read_bytes(link, 0, CFI_BYTES)
+                link.write_seq([(0, out(0xF0))])
+                decoded = bytearray(len(encoded))
+                for index in range(0, len(encoded) - 1, 2):
+                    value = _b2s_in(bus, encoded[index]
+                                    | (encoded[index + 1] << 8))
+                    decoded[index] = value & 0xFF
+                    decoded[index + 1] = value >> 8
+                cfi = parse_cfi(bytes(decoded))
+            except ProtocolError:
+                cfi = None
+            spec = _b2s_amd_spec(sequence, bus, cfi, raw)
+            profile = Profile(spec)
+            if verbose:
+                print("Burn2Slot: AMD-style ID %s, %s"
+                      % (raw.hex(" ").upper(), B2S_WIRING_NAMES[bus]))
+            return Detection(profile=profile, flash_id=raw, cfi=cfi,
+                             candidates=[profile], id_buffer=raw,
+                             method="Burn2Slot AMD scan")
+    return None
+
+
+def detect(link, profiles, verbose=False, fallback=False):
     """Match the cartridge against the loaded profiles with FlashGBX."""
     candidates = []
     for profile in profiles:
@@ -353,6 +596,10 @@ def detect(link, profiles, verbose=False):
             candidates.append((profile, bytes(flash_id), flashcart))
 
     if not candidates:
+        if fallback:
+            result = _fallback_detect(link, profiles, verbose=verbose)
+            if result is not None:
+                return result
         return Detection()
 
     cfi = None
@@ -406,11 +653,18 @@ def resolve_profile(link, args, profiles=None):
                 print("CFI: not readable (%s)" % error)
         return profile, cfi
 
-    result = detect(link, profiles, verbose=args.verbose)
+    result = detect(link, profiles, verbose=args.verbose, fallback=True)
     if result.profile is None:
         raise SystemExit(
-            "cartridge not found in the loaded profiles; pass --profile NAME "
+            "cartridge not found in the loaded profiles, and the Burn2Slot "
+            "scan did not recognise it either; pass --profile NAME "
             "(run `flash.py profiles`)")
+    if (result.profile.spec.get("synthetic")
+            and args.command in ("image", "erase", "program")
+            and not getattr(args, "fallback_write", False)):
+        raise SystemExit(
+            "detection used the Burn2Slot fallback; writing an unverified "
+            "cart type needs --fallback-write. Back up the cartridge first.")
     if result.ambiguous and args.verbose:
         names = ", ".join(profile.primary_name for profile in result.candidates)
         print("warning: several profiles matched, using %s (%s)"
@@ -421,6 +675,8 @@ def resolve_profile(link, args, profiles=None):
             "profile %r cannot write this cartridge (command set %s)"
             % (result.profile.primary_name,
                result.profile.command_set or "unknown"))
+    if result.method:
+        print("detection: %s" % result.method)
     print("profile: %s" % result.profile.primary_name)
     return result.profile, result.cfi
 
@@ -428,17 +684,18 @@ def resolve_profile(link, args, profiles=None):
 
 SAVE_BASE = 0x0E000000
 SAVE_SIZE = 0x10000  # 64 KiB SRAM, the save media on this cartridge
+SAVE_TYPES = {
+    "sram-32k": 0x8000,
+    "sram-64k": 0x10000,
+    "sram-128k": 0x20000,
+}
 
 
 def save_dump(link, output, size=SAVE_SIZE):
     """Read the cartridge save media and write it to a raw .sav file."""
     if size <= 0:
         raise ValueError("save size must be a positive byte count")
-    data = bytearray()
-    for offset in range(0, size, BLOCK_BYTES):
-        data += link.read8(SAVE_BASE + offset,
-                           min(BLOCK_BYTES, size - offset))
-    data = bytes(data)
+    data = read_bytes(link, SAVE_BASE, size)
     Path(output).write_bytes(data)
     return data
 
@@ -448,9 +705,10 @@ def save_restore(link, path, size=SAVE_SIZE, verify=True, show_progress=True):
     data = Path(path).read_bytes()
     if not data:
         raise ProtocolError("save file is empty")
-    if len(data) > size:
+    if len(data) != size:
         raise ProtocolError(
-            "save file is %d bytes but the cartridge save is %d bytes"
+            "save file is %d bytes but the cartridge save is exactly %d "
+            "bytes; a partial write would leave the rest of the save stale"
             % (len(data), size))
     written = 0
     for offset in range(0, len(data), BLOCK_BYTES):
@@ -465,10 +723,7 @@ def save_restore(link, path, size=SAVE_SIZE, verify=True, show_progress=True):
         print()
     if not verify:
         return data
-    back = bytearray()
-    for offset in range(0, len(data), BLOCK_BYTES):
-        back += link.read8(SAVE_BASE + offset,
-                           min(BLOCK_BYTES, len(data) - offset))
+    back = read_bytes(link, SAVE_BASE, len(data))
     back = bytes(back)
     if back != data:
         offset = next(position for position in range(len(data))
@@ -627,11 +882,13 @@ def _verify_sector(link, profile, start, chunk, use_crc=False, attempts=3):
     return back
 
 
-def _program_sector(link, profile, start, chunk, block_bytes):
+def _program_sector(link, profile, start, chunk, block_bytes, cancelled=None):
     cart_reset(link, profile, address=start)
     sector_erase(link, start, profile)
     written = 0
     for offset in range(0, len(chunk), block_bytes):
+        if cancelled is not None and cancelled():
+            raise KeyboardInterrupt("write cancelled")
         block = chunk[offset:offset + block_bytes]
         if block.count(0xFF) == len(block):
             continue
@@ -641,7 +898,7 @@ def _program_sector(link, profile, start, chunk, block_bytes):
 
 
 def write_image(link, path, profile, cfi=None, full=False, verify=True,
-                boot=False, state_path=None):
+                boot=False, state_path=None, erase_chip=False):
     image = Path(path).read_bytes()
     if not image:
         raise ProtocolError("image is empty")
@@ -673,16 +930,53 @@ def write_image(link, path, profile, cfi=None, full=False, verify=True,
             % (padded, total))
     if padded > len(image):
         image += b"\xff" * (padded - len(image))
+    block_bytes, chunk_bytes = prepare_write(link, profile, cfi)
+
+    if erase_chip:
+        if not profile.has_command("chip_erase"):
+            raise ProfileError(
+                "profile %r has no chip-erase command; use sector erase"
+                % profile.primary_name)
+        if state_path is None and total:
+            state_path = default_state_path(profile, [(0, total)])
+        if state_path is not None:
+            Path(state_path).unlink(missing_ok=True)
+        print("chip erase: erasing the whole flash")
+        chip_erase(link, profile)
+        payload = image
+        padding = (-len(payload)) % 4
+        if padding:
+            payload += b"\xff" * padding
+        for offset in range(0, len(payload), block_bytes):
+            block = payload[offset:offset + block_bytes]
+            if block and block.count(0xFF) == len(block):
+                continue
+            write_block(link, offset, block)
+        if verify:
+            back = read_region(link, 0, len(image))
+            if back != image:
+                position = next(index for index in range(len(image))
+                                if back[index] != image[index])
+                raise ProtocolError(
+                    "verify failed at 0x%X after chip erase (expected %02X, "
+                    "got %02X)" % (position, image[position], back[position]))
+        progress(link, 100)
+        done(link)
+        print("done")
+        if boot:
+            link.boot()
+        return
+
     sectors = profile.sector_map(len(image), cfi)
     if not sectors:
         raise ProfileError(
-            "profile %r has no sector map and no usable CFI data"
+            "profile %r has no sector map and no usable CFI data; "
+            "pass --chip-erase if the profile supports it"
             % profile.primary_name)
     sectors = [(offset, size) for offset, size in sectors
                if offset < len(image)]
     if not sectors or sectors[-1][0] + sectors[-1][1] < len(image):
         raise ProfileError("sector map does not cover the whole image")
-    block_bytes, chunk_bytes = prepare_write(link, profile, cfi)
 
     image_crcs = _sector_crcs(image, sectors)
     probe_spec = _probe_spec(sectors)
@@ -747,45 +1041,67 @@ def write_image(link, path, profile, cfi=None, full=False, verify=True,
     Path(state_path).unlink(missing_ok=True)
     progress(link, 0)
 
-    for number, index in enumerate(dirty, 1):
-        offset, size = sectors[index]
-        chunk = image[offset:offset + size]
-        print("[%d/%d] sector 0x%X (0x%X bytes) ..."
-              % (number, len(dirty), offset, size), end="", flush=True)
-        back = None
-        error = None
-        for attempt in range(2):
-            try:
-                written = _program_sector(link, profile, offset, chunk,
-                                          block_bytes)
-            except ProtocolError as failure:
-                # A rejected block leaves the sector half programmed; erase it
-                # again rather than aborting the whole image.
-                error = failure
-                print(" %s, re-erasing ..." % failure, end="", flush=True)
-                continue
+    cancelled = {"value": False}
+
+    def _cancel(_signum, _frame):
+        cancelled["value"] = True
+
+    previous_handler = signal.signal(signal.SIGINT, _cancel)
+    try:
+        for number, index in enumerate(dirty, 1):
+            if cancelled["value"]:
+                link.abort()
+                Path(state_path).unlink(missing_ok=True)
+                raise KeyboardInterrupt("write cancelled")
+            offset, size = sectors[index]
+            chunk = image[offset:offset + size]
+            print("[%d/%d] sector 0x%X (0x%X bytes) ..."
+                  % (number, len(dirty), offset, size), end="", flush=True)
+            back = None
             error = None
-            print(" wrote %d bytes" % written, end="", flush=True)
-            if not verify:
-                break
-            back = _verify_sector(link, profile, offset, chunk, use_crc)
-            if back is None:
-                print(", verified", end="")
-                break
-            print(" mismatch, rewriting ...", end="", flush=True)
-        if error is not None:
-            raise ProtocolError(
-                "sector 0x%X could not be programmed: %s" % (offset, error))
-        if verify and back is not None:
-            position = next(position for position in range(len(chunk))
-                            if back[position] != chunk[position])
-            raise ProtocolError(
-                "verify failed in sector 0x%X at 0x%X (expected %s, got %s)"
-                % (offset, position,
-                   chunk[position:position + 8].hex(" "),
-                   back[position:position + 8].hex(" ")))
-        progress(link, number * 100 // len(dirty))
-        print()
+            for attempt in range(2):
+                try:
+                    written = _program_sector(
+                        link, profile, offset, chunk, block_bytes,
+                        cancelled=lambda: cancelled["value"])
+                except ProtocolError as failure:
+                    # A rejected block leaves the sector half programmed; erase
+                    # it again rather than aborting the whole image.
+                    error = failure
+                    print(" %s, re-erasing ..." % failure, end="", flush=True)
+                    continue
+                error = None
+                print(" wrote %d bytes" % written, end="", flush=True)
+                if not verify:
+                    break
+                back = _verify_sector(link, profile, offset, chunk, use_crc)
+                if back is None:
+                    print(", verified", end="")
+                    break
+                print(" mismatch, rewriting ...", end="", flush=True)
+            if error is not None:
+                raise ProtocolError(
+                    "sector 0x%X could not be programmed: %s"
+                    % (offset, error))
+            if verify and back is not None:
+                position = next(position for position in range(len(chunk))
+                                if back[position] != chunk[position])
+                raise ProtocolError(
+                    "verify failed in sector 0x%X at 0x%X (expected %s, got %s)"
+                    % (offset, position,
+                       chunk[position:position + 8].hex(" "),
+                       back[position:position + 8].hex(" ")))
+            progress(link, number * 100 // len(dirty))
+            print()
+    except KeyboardInterrupt:
+        Path(state_path).unlink(missing_ok=True)
+        try:
+            link.abort()
+        except Exception:
+            pass
+        raise
+    finally:
+        signal.signal(signal.SIGINT, previous_handler)
 
     if verify:
         _save_state(state_path, image, sectors, image_crcs, probe_spec, link)
@@ -831,6 +1147,8 @@ def print_detection(result):
         return 1
     profile = result.profile
     print("profile: %s" % profile.primary_name)
+    if result.method:
+        print("detection: %s" % result.method)
     if profile.path:
         print("file: %s" % profile.path.name)
     if len(profile.names) > 1:
@@ -876,7 +1194,12 @@ def upload(args):
     command = [args.gbasend, "-p", args.port, "-b", str(args.upload_baud),
                "-m", "--handshake-wait", str(args.handshake_wait),
                str(payload)]
-    subprocess.run(command, check=True)
+    result = subprocess.run(command, check=False)
+    if result.returncode != 0:
+        raise SystemExit(
+            "payload upload failed (gbasend exit %d). Hold START+SELECT "
+            "while powering the GBA on, check the link wiring, then try "
+            "again." % result.returncode)
 
 
 def doctor(args):
@@ -1005,6 +1328,9 @@ def main(argv=None):
     save.add_argument("--size", type=lambda value: int(value, 0),
                       default=SAVE_SIZE,
                       help="save media size in bytes (default 0x10000)")
+    save.add_argument("--save-type", choices=sorted(SAVE_TYPES),
+                      help="named SRAM size; overrides --size. EEPROM and "
+                           "save-flash are not supported")
 
     restore = sub.add_parser("restore", parents=[common],
                              help="write a raw .sav file to the cartridge save")
@@ -1012,17 +1338,24 @@ def main(argv=None):
     restore.add_argument("--size", type=lambda value: int(value, 0),
                          default=SAVE_SIZE,
                          help="save media size in bytes (default 0x10000)")
+    restore.add_argument("--save-type", choices=sorted(SAVE_TYPES),
+                         help="named SRAM size; overrides --size. The file "
+                              "must match this size exactly")
     restore.add_argument("--no-verify", action="store_true")
 
     erase = sub.add_parser("erase", parents=[common],
                            help="erase one flash sector")
     erase.add_argument("address", type=lambda value: int(value, 0))
     erase.add_argument("--timeout", type=float, default=30.0)
+    erase.add_argument("--fallback-write", action="store_true",
+                       help="allow a Burn2Slot-detected cart")
 
     program = sub.add_parser("program", parents=[common],
                              help="program one 16-bit word")
     program.add_argument("address", type=lambda value: int(value, 0))
     program.add_argument("value", type=lambda value: int(value, 0))
+    program.add_argument("--fallback-write", action="store_true",
+                         help="allow a Burn2Slot-detected cart")
 
     seq = sub.add_parser("seq", parents=[common],
                          help="write address:value pairs verbatim")
@@ -1035,6 +1368,12 @@ def main(argv=None):
                        help="ignore the diff and state, rewrite every sector")
     image.add_argument("--no-verify", action="store_true")
     image.add_argument("--boot", action="store_true")
+    image.add_argument("--fallback-write", action="store_true",
+                       help="allow writing when detection used the Burn2Slot "
+                            "fallback instead of a known FlashGBX profile")
+    image.add_argument("--chip-erase", action="store_true",
+                       help="erase the whole chip before programming instead "
+                            "of erasing sectors")
     image.add_argument("--state", default=None,
                        help="delta state file (default: a cache file keyed by "
                             "the profile and sector map; "
@@ -1087,7 +1426,7 @@ def main(argv=None):
                     print("CFI: not readable (%s)" % error)
                 return 0
             return print_detection(detect(link, profiles,
-                                          verbose=args.verbose))
+                                          verbose=args.verbose, fallback=True))
         elif args.command == "id":
             if args.profile:
                 profile = find_profile(profiles, args.profile)
@@ -1096,7 +1435,8 @@ def main(argv=None):
                 print(cart_id(link, profile).hex(" ").upper())
                 print("profile: %s" % profile.primary_name)
             else:
-                result = detect(link, profiles, verbose=args.verbose)
+                result = detect(link, profiles, verbose=args.verbose,
+                                fallback=True)
                 if result.profile is not None:
                     print(result.id_buffer[:8].hex(" ").upper())
                     print("profile: %s" % result.profile.primary_name)
@@ -1106,15 +1446,18 @@ def main(argv=None):
                         "warning: no profile matched the flash ID\n")
         elif args.command == "cfi":
             profile = None
+            detected = None
             if args.profile:
                 profile = find_profile(profiles, args.profile)
                 if profile is None:
                     raise SystemExit("unknown profile %r" % args.profile)
             else:
-                result = detect(link, profiles, verbose=args.verbose)
-                profile = result.profile
+                detected = detect(link, profiles, verbose=args.verbose,
+                                  fallback=True)
+                profile = detected.profile
             if profile is not None:
-                info = read_cfi(link, profile)
+                info = (detected.cfi if detected is not None and detected.cfi
+                        else read_cfi(link, profile))
             else:
                 try:
                     info = read_cfi(link)
@@ -1132,11 +1475,13 @@ def main(argv=None):
             Path(args.output).write_bytes(data)
             print("wrote %d bytes to %s" % (args.length, args.output))
         elif args.command == "save":
-            data = save_dump(link, args.output, args.size)
+            size = SAVE_TYPES.get(args.save_type, args.size)
+            data = save_dump(link, args.output, size)
             print("wrote %d bytes to %s (sha256 %s)"
                   % (len(data), args.output, hashlib.sha256(data).hexdigest()))
         elif args.command == "restore":
-            data = save_restore(link, args.file, args.size,
+            size = SAVE_TYPES.get(args.save_type, args.size)
+            data = save_restore(link, args.file, size,
                                 verify=not args.no_verify)
             print("%d bytes %s from %s"
                   % (len(data),
@@ -1161,7 +1506,8 @@ def main(argv=None):
             profile, cfi = resolve_profile(link, args, profiles)
             write_image(link, args.file, profile, cfi=cfi,
                         full=args.full, verify=not args.no_verify,
-                        boot=args.boot, state_path=args.state)
+                        boot=args.boot, state_path=args.state,
+                        erase_chip=args.chip_erase)
         elif args.command == "boot":
             link.boot()
             print("soft reset requested")

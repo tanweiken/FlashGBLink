@@ -216,6 +216,12 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(self.device._command_set, 2)
         self.assertEqual(self.device.wait_for_ack(), 1)
 
+    def test_eeprom_read_is_refused_instead_of_returning_blank_data(self):
+        command = self.device.DEVICE_CMD
+        with self.assertRaises(self.device_module.ProtocolError) as caught:
+            self.device._write(bytearray([command["AGB_CART_READ_EEPROM"]]))
+        self.assertIn("does not support EEPROM", str(caught.exception))
+
     def test_rom_read_advances_the_address(self):
         command = self.device.DEVICE_CMD
         self.device._set_fw_variable("ADDRESS", 0)
@@ -288,6 +294,15 @@ class AdapterTests(unittest.TestCase):
         self.device._write(bytearray([command["FLASH_PROGRAM"]]))
         self.device._write(bytearray([0xFF] * 64), wait=True)
         self.assertEqual(self.device.LINK.blocks[-1][0], 64)
+
+    def test_write_rom_stops_between_blocks_when_cancelled(self):
+        self.device.CANCEL = True
+        try:
+            result = self.device.WriteROM(0, bytes(128), max_length=64)
+        finally:
+            self.device.CANCEL = False
+        self.assertFalse(result)
+        self.assertEqual(self.device.LINK.blocks, [])
 
     def test_program_pads_a_partial_frame(self):
         command = self.device.DEVICE_CMD

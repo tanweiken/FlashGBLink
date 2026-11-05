@@ -12,7 +12,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-arm-none-eabi
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc gcc-arm-none-eabi
       - run: python3 -m pip install pyserial "git+https://github.com/Lesserkuma/FlashGBX.git"
       - run: make -C payload
       - run: python3 -m unittest discover -s tests -t . -v

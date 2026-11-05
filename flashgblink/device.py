@@ -22,7 +22,8 @@ from FlashGBX.Logging import dprint
 from . import __version__
 from .log import log
 from .gbalink import (BLOCK_BYTES, Link, ProtocolError, ST_OK, done,
-                      encode_write_plan, progress, read_region, write_block)
+                      encode_write_plan, progress, read_bytes, read_region,
+                      write_block)
 
 SAVE_BASE = 0x0E000000
 
@@ -421,9 +422,9 @@ class GbxDevice(LK_Device):
             return
 
         if data[0] == command["AGB_CART_READ_EEPROM"]:
-            size = int(self.FW_VAR.get("TRANSFER_SIZE") or 0)
-            self._queue(b"\xff" * size)
-            return
+            raise ProtocolError(
+                "FlashGBLink does not support EEPROM saves; the payload has "
+                "no EEPROM bit-banging path, so no backup was read")
 
         if data[0] == command["AGB_READ_GPIO_RTC"]:
             # No RTC on the link path; eight zero bytes mean "not present".
@@ -467,13 +468,7 @@ class GbxDevice(LK_Device):
 
     def _read_save(self):
         size = int(self.FW_VAR.get("TRANSFER_SIZE") or 0)
-        data = bytearray()
-        offset = 0
-        while offset < size:
-            chunk = min(BLOCK_BYTES, size - offset)
-            data += self.LINK.read8(SAVE_BASE + self._save_read_addr + offset,
-                                    chunk)
-            offset += chunk
+        data = read_bytes(self.LINK, SAVE_BASE + self._save_read_addr, size)
         self._save_read_addr += size
         self._queue(bytes(data))
 
@@ -520,13 +515,13 @@ class GbxDevice(LK_Device):
 
     def _write_eeprom(self, data):
         raise ProtocolError(
-            "FlashGBLink does not support EEPROM saves yet; the payload has "
-            "no EEPROM bit-banging path")
+            "FlashGBLink does not support EEPROM saves; the payload has no "
+            "EEPROM bit-banging path, so nothing was written")
 
     def _write_save_flash(self, data):
         raise ProtocolError(
-            "FlashGBLink does not support save flash writing yet; only SRAM "
-            "save dump and restore are implemented")
+            "FlashGBLink does not support save-flash writing; only SRAM save "
+            "dump and restore are implemented")
 
     # -- flash programming --------------------------------------------------
 
@@ -637,11 +632,20 @@ class GbxDevice(LK_Device):
         length = min(len(buffer), min(max_length, self.MAX_BUFFER_WRITE))
         if length == 0:
             return False
-        if flash_buffer_size:
+        if (flash_buffer_size
+                and self.FW_VAR.get("BUFFER_SIZE") != flash_buffer_size):
             self._set_fw_variable("BUFFER_SIZE", flash_buffer_size)
         self._install_plan()
         skipped = False
         for offset in range(0, len(buffer), length):
+            if getattr(self, "CANCEL", False):
+                self.SKIPPING = False
+                self._plan_key = None
+                try:
+                    self.LINK.abort()
+                except Exception:
+                    pass
+                return False
             chunk = bytes(buffer[offset:offset + length])
             if chunk and chunk == b"\xFF" * len(chunk):
                 skipped = True

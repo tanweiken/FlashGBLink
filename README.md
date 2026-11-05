@@ -239,13 +239,19 @@ $PY flash.py image Apotris.gba --boot
   rewrites everything without checking; `--no-verify` skips the read-back and
   records no state.
 - Each changed sector is erased, programmed in 4 KiB blocks using the profile's
-  buffered-write template, and verified.
+  buffered-write template, and verified. `--chip-erase` erases the whole chip
+  first for profiles that support it and have no usable sector map.
+- ROM and save reads use the payload's checked-read commands. A block whose
+  checksum does not match is retried; a persistent mismatch raises instead of
+  writing a suspect backup. An older payload falls back to unchecked reads
+  with a one-time warning.
 
 Options: `--port`, `--baud` (data phase SPI clock, default 1.25 MHz),
 `--upload-baud` (multiboot clock, default 256 kHz), `--config` (profile
 directory; default: autodetect FlashGBX's), `--profile` (profile name,
-skips autodetection), `--state` (delta state file),
-`FLASHGBLINK_CONFIG` (profile directory override),
+skips autodetection), `--state` (delta state file), `--fallback-write`
+(allow writing a Burn2Slot-detected cart), `--chip-erase` (erase the whole
+chip instead of sectors), `FLASHGBLINK_CONFIG` (profile directory override),
 `--gbasend`, `--payload`, `--verbose`.
 
 ## Use cases
@@ -257,15 +263,22 @@ skips autodetection), `--state` (delta state file),
 
 ## Saves
 
-`save` dumps the save media at `0x0E000000` to a raw `.sav` that emulators can
-open; `restore` writes one back and reads it to confirm. Both take
-`--size BYTES` for a different save media size (default `0x10000`, 64 KiB).
+`save` dumps SRAM at `0x0E000000` to a raw `.sav` that emulators can open;
+`restore` writes one back and reads it to confirm. The default is 64 KiB; use
+`--save-type sram-32k|sram-64k|sram-128k` or `--size BYTES` for another size.
+`restore` requires the file to match that size exactly, so a short file cannot
+leave the rest of the save stale.
 
 ```sh
 $PY flash.py save apotris.sav
+$PY flash.py save --save-type sram-32k old.sav
 $PY flash.py restore apotris.sav            # verified
 $PY flash.py restore old.sav --no-verify
 ```
+
+EEPROM (512 B / 8 KiB) and save-flash (64/128 KiB) are not supported. An
+attempt fails with an explicit error rather than producing a blank backup.
+See [`docs/cartridge-support.md`](docs/cartridge-support.md).
 
 The save bus is 8 bits wide, so the payload has byte-wide reads and writes
 (`0x5A70`/`0x5A80`) separate from the 16-bit cartridge path. A 16-bit load from
@@ -293,7 +306,10 @@ and a save that was never dumped is gone.
 ## Additional limitations
 
 - AGB cartridges only.
-- EEPROM and save-flash writes are not implemented.
+- EEPROM and save-flash dump/restore are not implemented. RTC data is not read.
+- Cartridges with no matching FlashGBX profile can be found by a
+  Burn2Slot-style scan. Detection does not erase or program data; writing one
+  needs `--fallback-write` and should be treated as unverified.
 - Profiles that require a cartridge power cycle abort with a prompt; power the
   GBA off and on holding START+SELECT, re-upload the payload and reconnect.
 - FlashGBX erases every sector in the image unless **Skip writing matching ROM
@@ -335,14 +351,18 @@ reached with the same commands.
 | Word | Meaning |
 |---|---|
 | `0x5A5A5A5A` | ping; reply is the current status |
+| `0x5A000C00` | abort: discard the installed write template until the next one |
+| `0x5ABE00` | capabilities: reply is `0x0001nnnn` (version 1, feature bits) |
 | `0x5A20nn` | write `nn` address/value pairs (two words per pair) |
 | `0x5A3000` | read: next words are address and count, then `count` dummies |
+| `0x5AC000` | checked read: like `0x5A3000`, then one checksum word |
+| `0x5A70nn` | read bytes: next words are address and byte count, then dummies |
+| `0x5AC100` | checked byte read: like `0x5A70`, then one checksum word |
 | `0x5A5000` | write block: next words are address and packed word count, then data |
 | `0x5AB000` | CRC32 job: next words are address and byte count; poll with pings until OK, then read the result |
 | `0x5AB100` | CRC32 result: next word is a dummy; its reply is the last job's CRC32 |
 | `0x5A0060nn` / `0x5A0160nn` | draw `nn`% on the write (green) / verify (cyan) bar |
 | `0x5AA000` | show the FLASH COMPLETE / RESTART GBA TO PLAY screen |
-| `0x5A7000` | read bytes: next words are address and byte count, then dummies |
 | `0x5A8000` | write bytes: next words are address and byte count, then packed data |
 | `0x5A40nn` | soft reset into the cartridge |
 | `0x5A9000` | install a write template: chunk bytes, command count, then 4 words per command |
@@ -382,9 +402,10 @@ Run the hardware-free tests:
 .venv/bin/python3 -m unittest discover -s tests
 ```
 
-The suite covers the word protocol, CFI decoding, write-plan encoding, the
-FlashGBLink device emulation, FlashGBX `Flashcart` detection through the
-adapter, and the progress-bar phase logic.
+The suite covers the word protocol, checked reads with fault injection, CFI
+decoding, write-plan encoding, the FlashGBLink device emulation, FlashGBX
+`Flashcart` detection through the adapter, Burn2Slot fallback detection, chip
+erase, and the progress-bar phase logic.
 
 ## Roadmap
 

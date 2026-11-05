@@ -20,9 +20,32 @@ typedef unsigned char u8;
 typedef unsigned short u16;
 typedef unsigned int u32;
 
+#ifdef PAYLOAD_SIM
+/* Host build used by tests: the harness supplies the SIO exchange and a
+ * simulated cartridge bus, so the real command and plan code can run without
+ * a GBA. */
+extern u32 sim_sio_xfer(u32 out);
+extern u16 sim_rd16(u32 addr);
+extern void sim_wr16(u32 addr, u16 value);
+extern u8 sim_rd8(u32 addr);
+extern void sim_wr8(u32 addr, u8 value);
+
+static u32 sim_siodata;
+static u16 sim_siocnt;
+static u16 sim_rcnt;
+static u16 sim_dispcnt;
+static u16 sim_vram[240u * 160u];
+
+#define REG_SIODATA32 sim_siodata
+#define REG_SIOCNT sim_siocnt
+#define REG_RCNT sim_rcnt
+#define REG_DISPCNT sim_dispcnt
+#define VRAM ((volatile u16 *)sim_vram)
+#else
 #define REG_SIODATA32 (*(volatile u32 *)0x04000120)
 #define REG_SIOCNT (*(volatile u16 *)0x04000128)
 #define REG_RCNT (*(volatile u16 *)0x04000134)
+#endif
 
 #define SIOCNT_32BIT 0x1000u
 #define SIOCNT_START 0x0080u
@@ -32,6 +55,7 @@ typedef unsigned int u32;
 #define HDR_MAGIC 0x5Au
 #define HEADER(op, n) ((u32)(HDR_MAGIC << 24) | ((u32)(op) << 8) | ((n) & 0xFFu))
 
+#define OP_ABORT 0x0Cu
 #define OP_WRITE_SEQ 0x20u
 #define OP_READ 0x30u
 #define OP_BOOT 0x40u
@@ -43,6 +67,15 @@ typedef unsigned int u32;
 #define OP_DONE 0xA0u
 #define OP_CRC32 0xB0u
 #define OP_CRC_GET 0xB1u
+#define OP_CAPS 0xBEu
+#define OP_READ_CHECK 0xC0u
+#define OP_READ8_CHECK 0xC1u
+
+/* Capability reply: high half is the protocol version, low half is a flag
+ * bitmask. Hosts that see anything else treat the payload as an older build
+ * and fall back to the unchecked read commands. */
+#define CAPS_VERSION 0x0001u
+#define CAP_READ_CHECK 0x0001u
 
 #define BLOCK_WORDS 1024u /* packed 32-bit words, 4 KiB of cartridge data */
 #define PLAN_MAX_COMMANDS 12u
@@ -90,6 +123,16 @@ static u32 crc_table[256];
 /* Result of the last CRC32 job, fetched by OP_CRC_GET. */
 static u32 crc_value;
 
+#ifdef PAYLOAD_SIM
+static inline u32 sio_xfer(u32 out)
+{
+	return sim_sio_xfer(out);
+}
+
+static inline void sio_init(void)
+{
+}
+#else
 static inline u32 sio_xfer(u32 out)
 {
 	REG_SIODATA32 = out;
@@ -107,6 +150,7 @@ static inline void sio_init(void)
 	REG_RCNT = 0x0000u;
 	REG_SIOCNT = SIOCNT_32BIT;
 }
+#endif
 
 static inline u32 bus_addr(u32 addr)
 {
@@ -115,12 +159,20 @@ static inline u32 bus_addr(u32 addr)
 
 static inline void wr16(u32 addr, u16 value)
 {
+#ifdef PAYLOAD_SIM
+	sim_wr16(bus_addr(addr), value);
+#else
 	*(volatile u16 *)bus_addr(addr) = value;
+#endif
 }
 
 static inline u16 rd16(u32 addr)
 {
+#ifdef PAYLOAD_SIM
+	return sim_rd16(bus_addr(addr));
+#else
 	return *(volatile u16 *)bus_addr(addr);
+#endif
 }
 
 static inline u32 rd32(u32 addr)
@@ -128,6 +180,32 @@ static inline u32 rd32(u32 addr)
 	u16 lo = rd16(addr);
 	u16 hi = rd16(addr + 2);
 	return (u32)lo | ((u32)hi << 16);
+}
+
+static inline u8 rd8(u32 addr)
+{
+#ifdef PAYLOAD_SIM
+	return sim_rd8(bus_addr(addr));
+#else
+	return *(volatile u8 *)bus_addr(addr);
+#endif
+}
+
+static inline void wr8(u32 addr, u8 value)
+{
+#ifdef PAYLOAD_SIM
+	sim_wr8(bus_addr(addr), value);
+#else
+	*(volatile u8 *)bus_addr(addr) = value;
+#endif
+}
+
+static void cmd_abort(void)
+{
+	/* Host-side cancel. Stop accepting block writes until the next plan is
+	 * installed; the current block, if any, has already finished. */
+	plan_count = 0;
+	reply = ST_OK;
 }
 
 static void cmd_write_seq(u32 count)
@@ -142,6 +220,20 @@ static void cmd_write_seq(u32 count)
 	reply = ST_OK;
 }
 
+/* Order-sensitive rolling checksum for a read block. Rotating before the XOR
+ * catches swapped or duplicated words as well as changed ones, and costs one
+ * shift and one XOR per word on the cartridge bus. */
+static inline u32 roll_sum(u32 sum, u32 word)
+{
+	return (sum << 1 | sum >> 31) ^ word;
+}
+
+static void cmd_caps(void)
+{
+	(void)sio_xfer((CAPS_VERSION << 16) | CAP_READ_CHECK);
+	reply = ST_OK;
+}
+
 static void cmd_read(void)
 {
 	u32 addr = sio_xfer(ST_ECHO);
@@ -150,6 +242,23 @@ static void cmd_read(void)
 
 	for (i = 0; i < count; i++)
 		(void)sio_xfer(rd32(addr + i * 4u));
+	reply = ST_OK;
+}
+
+static void cmd_read_check(void)
+{
+	u32 addr = sio_xfer(ST_ECHO);
+	u32 count = sio_xfer(ST_ECHO);
+	u32 sum = 0;
+	u32 i;
+
+	for (i = 0; i < count; i++) {
+		u32 word = rd32(addr + i * 4u);
+
+		sum = roll_sum(sum, word);
+		(void)sio_xfer(word);
+	}
+	(void)sio_xfer(sum);
 	reply = ST_OK;
 }
 
@@ -395,10 +504,32 @@ static void cmd_read8(void)
 		u32 word = 0;
 
 		for (j = 0; j < 4u && i + j < count; j++)
-			word |= (u32)(*(volatile u8 *)bus_addr(addr + i + j))
-				<< (j * 8u);
+			word |= (u32)rd8(addr + i + j) << (j * 8u);
 		(void)sio_xfer(word);
 	}
+	reply = ST_OK;
+}
+
+static void cmd_read8_check(void)
+{
+	u32 addr = sio_xfer(ST_ECHO);
+	u32 count = sio_xfer(ST_ECHO);
+	u32 sum = 0;
+	u32 i, j;
+
+	if (count > BLOCK_WORDS * 4u) {
+		reply = ST_BAD;
+		return;
+	}
+	for (i = 0; i < count; i += 4u) {
+		u32 word = 0;
+
+		for (j = 0; j < 4u && i + j < count; j++)
+			word |= (u32)rd8(addr + i + j) << (j * 8u);
+		sum = roll_sum(sum, word);
+		(void)sio_xfer(word);
+	}
+	(void)sio_xfer(sum);
 	reply = ST_OK;
 }
 
@@ -416,11 +547,16 @@ static void cmd_write8(void)
 	for (i = 0; i < words; i++)
 		block_buffer[i] = sio_xfer(ST_ECHO);
 	for (i = 0; i < count; i++)
-		*(volatile u8 *)bus_addr(addr + i) =
-			(u8)(block_buffer[i / 4u] >> ((i % 4u) * 8u));
+		wr8(addr + i, (u8)(block_buffer[i / 4u] >> ((i % 4u) * 8u)));
 	reply = ST_OK;
 }
 
+#ifdef PAYLOAD_SIM
+static void cmd_boot(void)
+{
+	reply = ST_OK;
+}
+#else
 static void cmd_boot(void)
 {
 	/* SWI 00h only resets the CPU state; it leaves I/O registers alone.
@@ -445,11 +581,14 @@ static void cmd_boot(void)
 	for (;;)
 		;
 }
+#endif
 
 /* -- screen ---------------------------------------------------------------- */
 
+#ifndef PAYLOAD_SIM
 #define REG_DISPCNT (*(volatile u16 *)0x04000000)
 #define VRAM ((volatile u16 *)0x06000000)
+#endif
 
 #define SCREEN_W 240u
 #define SCREEN_H 160u
@@ -688,11 +827,20 @@ static void dispatch(u32 hdr)
 
 	op = (hdr >> 8) & 0xFFu;
 	switch (op) {
+	case OP_ABORT:
+		cmd_abort();
+		break;
 	case OP_WRITE_SEQ:
 		cmd_write_seq(hdr & 0xFFu);
 		break;
 	case OP_READ:
 		cmd_read();
+		break;
+	case OP_READ_CHECK:
+		cmd_read_check();
+		break;
+	case OP_CAPS:
+		cmd_caps();
 		break;
 	case OP_CRC32:
 		cmd_crc32();
@@ -719,6 +867,9 @@ static void dispatch(u32 hdr)
 	case OP_READ8:
 		cmd_read8();
 		break;
+	case OP_READ8_CHECK:
+		cmd_read8_check();
+		break;
 	case OP_WRITE8:
 		cmd_write8();
 		break;
@@ -731,6 +882,7 @@ static void dispatch(u32 hdr)
 	}
 }
 
+#ifndef PAYLOAD_SIM
 int main(void)
 {
 	sio_init();
@@ -742,3 +894,4 @@ int main(void)
 	for (;;)
 		dispatch(sio_xfer(reply));
 }
+#endif

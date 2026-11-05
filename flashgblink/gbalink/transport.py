@@ -9,6 +9,7 @@ addresses; the payload's 16-bit stores and loads are what make that possible.
 import struct
 import threading
 import time
+import warnings
 from pathlib import Path
 
 from .errors import ProtocolError, TransferError, UnsupportedCommand
@@ -19,6 +20,7 @@ GBASEND_PID = 0x000A
 PING = 0x5A5A5A5A
 HDR_MAGIC = 0x5A
 
+OP_ABORT = 0x0C
 OP_WRITE_SEQ = 0x20
 OP_READ = 0x30
 OP_BOOT = 0x40
@@ -30,10 +32,19 @@ OP_SET_PLAN = 0x90
 OP_DONE = 0xA0
 OP_CRC32 = 0xB0
 OP_CRC_GET = 0xB1
+OP_CAPS = 0xBE
+OP_READ_CHECK = 0xC0
+OP_READ8_CHECK = 0xC1
 
 ST_OK = 0xA5A50000
 ST_ECHO = 0xA5A5E000
 ST_BAD = 0xA5A500E1
+ST_TIMEOUT = 0xA5A500E2
+
+# High half of the OP_CAPS reply; low half is a capability bitmask.
+CAPS_VERSION = 0x0001
+CAP_READ_CHECK = 0x0001
+READ_CHECK_ATTEMPTS = 3
 
 # A desynced transfer is recovered by clocking dummy words at the payload:
 # they are either the remaining replies of the aborted command or invalid
@@ -110,6 +121,8 @@ class Link:
         self._cond = threading.Condition()
         self._lock = threading.RLock()
         self._closed = False
+        self._caps = None
+        self._warned_unchecked = False
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
 
@@ -257,6 +270,78 @@ class Link:
         status = self.xfer_with_recovery(words, timeout=timeout)[-1]
         _check_status(status)
 
+    def capabilities(self, refresh=False):
+        """Return the payload's capability bits, or 0 for an older payload.
+
+        The probe is harmless on an old payload: it rejects the unknown opcode
+        with ST_BAD and stays in sync, so the caller can fall back to the
+        unchecked read commands.
+        """
+        caps = getattr(self, "_caps", None)
+        if caps is not None and not refresh:
+            return caps
+        frame = [(HDR_MAGIC << 24) | (OP_CAPS << 8), 0xFFFFFFFF, PING]
+        try:
+            replies = self.xfer_with_recovery(frame, timeout=2.0)
+        except ProtocolError:
+            self._caps = 0
+            return 0
+        caps = replies[1] if len(replies) > 1 else 0
+        if caps == ST_BAD or (caps & 0xFFFF0000) != (CAPS_VERSION << 16):
+            caps = 0
+        else:
+            caps &= 0xFFFF
+        self._caps = caps
+        return caps
+
+    def supports(self, capability):
+        return bool(self.capabilities() & capability)
+
+    def _warn_unchecked_reads(self):
+        if getattr(self, "_warned_unchecked", False):
+            return
+        self._warned_unchecked = True
+        warnings.warn(
+            "the running payload has no checked-read support; ROM and save "
+            "dumps cannot detect link corruption. Upload payload/flasher.gba "
+            "from this release to enable it.",
+            RuntimeWarning, stacklevel=2)
+
+    def read_words_checked(self, address, count, timeout=10.0,
+                           attempts=READ_CHECK_ATTEMPTS):
+        """Read words and verify the payload's rolling checksum.
+
+        A checksum mismatch is retried with a fresh frame; the link framing is
+        intact in that case, so no resync is needed. Repeated mismatches mean
+        the data path is unreliable and the read fails rather than returning
+        bytes that might be wrong.
+        """
+        if not self.supports(CAP_READ_CHECK):
+            self._warn_unchecked_reads()
+            return self.read_words(address, count, timeout=timeout)
+        expected = None
+        got = None
+        for _attempt in range(max(1, attempts)):
+            frame = [(HDR_MAGIC << 24) | (OP_READ_CHECK << 8),
+                     address & 0xFFFFFFFF, count & 0xFFFFFFFF]
+            frame += [0] * count
+            frame += [0, PING]
+            replies = self.xfer_with_recovery(frame, timeout=timeout)
+            _check_status(replies[-1])
+            if len(replies) < count + 5:
+                raise TransferError(
+                    "checked read at 0x%X returned %d words, expected %d"
+                    % (address, len(replies) - 4, count + 1), missing=1)
+            words = replies[3:3 + count]
+            expected = replies[3 + count]
+            got = _roll_sum(words)
+            if got == expected:
+                return words
+        raise TransferError(
+            "read at 0x%X returned a bad checksum after %d attempts "
+            "(expected 0x%08X, got 0x%08X)"
+            % (address, max(1, attempts), expected, got))
+
     def read_words(self, address, count, timeout=10.0):
         words = [(HDR_MAGIC << 24) | (OP_READ << 8), address & 0xFFFFFFFF,
                  count & 0xFFFFFFFF]
@@ -319,6 +404,37 @@ class Link:
             timeout=timeout)
         return replies[1]
 
+    def read8_checked(self, address, count, timeout=10.0,
+                      attempts=READ_CHECK_ATTEMPTS):
+        """Byte-wide checked read; the checksum covers the packed words."""
+        if not self.supports(CAP_READ_CHECK):
+            self._warn_unchecked_reads()
+            return self.read8(address, count, timeout=timeout)
+        words = (count + 3) // 4
+        expected = None
+        got = None
+        for _attempt in range(max(1, attempts)):
+            frame = [(HDR_MAGIC << 24) | (OP_READ8_CHECK << 8),
+                     address & 0xFFFFFFFF, count & 0xFFFFFFFF]
+            frame += [0] * words
+            frame += [0, PING]
+            replies = self.xfer_with_recovery(frame, timeout=timeout)
+            _check_status(replies[-1])
+            if len(replies) < words + 5:
+                raise TransferError(
+                    "checked byte read at 0x%X returned %d words, expected %d"
+                    % (address, len(replies) - 4, words + 1), missing=1)
+            packed = replies[3:3 + words]
+            expected = replies[3 + words]
+            got = _roll_sum(packed)
+            if got == expected:
+                raw = b"".join(struct.pack("<I", word) for word in packed)
+                return bytes(raw[:count])
+        raise TransferError(
+            "byte read at 0x%X returned a bad checksum after %d attempts "
+            "(expected 0x%08X, got 0x%08X)"
+            % (address, max(1, attempts), expected, got))
+
     def read8(self, address, count, timeout=10.0):
         words = (count + 3) // 4
         frame = [(HDR_MAGIC << 24) | (OP_READ8 << 8), address & 0xFFFFFFFF,
@@ -348,6 +464,18 @@ class Link:
                 return
         raise ProtocolError("byte write at 0x%X did not complete" % address)
 
+    def abort(self):
+        """Ask the payload to stop accepting block writes.
+
+        Best effort: cancelling is always followed by the link being closed or
+        re-synchronised, so a failure here must not mask the cancel itself.
+        """
+        try:
+            self.xfer_with_recovery(
+                [(HDR_MAGIC << 24) | (OP_ABORT << 8), PING], timeout=1.0)
+        except ProtocolError:
+            pass
+
     def boot(self):
         self.ser.write(_pack_words([(HDR_MAGIC << 24) | (OP_BOOT << 8)]))
         self.ser.flush()
@@ -365,12 +493,35 @@ def _hex(words):
     return " ".join("%08X" % word for word in words)
 
 
-def read_region(link, address, length):
+def _roll_sum(words):
+    total = 0
+    for word in words:
+        total = ((total << 1) | (total >> 31)) & 0xFFFFFFFF
+        total ^= word & 0xFFFFFFFF
+    return total
+
+
+def read_region(link, address, length, verify=True):
     out = bytearray()
+    reader = getattr(link, "read_words_checked", None) if verify else None
+    if reader is None:
+        reader = link.read_words
     for offset in range(0, length, BLOCK_BYTES):
         size = min(BLOCK_BYTES, length - offset)
-        words = link.read_words(address + offset, (size + 3) // 4)
+        words = reader(address + offset, (size + 3) // 4)
         out += struct.pack("<%dI" % len(words), *words)[:size]
+    return bytes(out)
+
+
+def read_bytes(link, address, length, verify=True):
+    """Byte-wide read for the save bus, with the same integrity check."""
+    out = bytearray()
+    reader = getattr(link, "read8_checked", None) if verify else None
+    if reader is None:
+        reader = link.read8
+    for offset in range(0, length, BLOCK_BYTES):
+        size = min(BLOCK_BYTES, length - offset)
+        out += reader(address + offset, size)
     return bytes(out)
 
 
