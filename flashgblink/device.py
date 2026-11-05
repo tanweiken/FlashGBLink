@@ -566,14 +566,14 @@ class GbxDevice(LK_Device):
             except Exception:
                 pass
             return result
-        if action == "READ":
-            # FlashGBX verifies the image with a second read pass; switch to
-            # the cyan bar and leave the green one full.
-            if not self._verify_phase:
-                self._update_progress(self._write_total)
-                self._verify_phase = True
-                self._last_percent[1] = -1
-                self._update_progress(0)
+        if action == "INITIALIZE" and args.get("method") == "ROM_WRITE_VERIFY":
+            # FlashGBX announces the verification pass here.  Its CRC32
+            # compare then reports UPDATE_POS; waiting for a READ (as the
+            # older read-back verify did) leaves the cyan bar at 0.
+            self._begin_verify()
+        elif action == "READ":
+            # Older FlashGBX versions verify by reading the image back.
+            self._begin_verify()
         elif action in ("UPDATE_POS", "SECTOR_ERASE", "WRITE"):
             pos = args.get("pos")
             if pos is None:
@@ -581,6 +581,15 @@ class GbxDevice(LK_Device):
             if pos is not None:
                 self._update_progress(pos)
         return result
+
+    def _begin_verify(self):
+        # Switch to the cyan bar and leave the green one full.
+        if self._verify_phase:
+            return
+        self._update_progress(self._write_total)
+        self._verify_phase = True
+        self._last_percent[1] = -1
+        self._update_progress(0)
 
     def _update_progress(self, position):
         if not self._write_active or not self._write_total or self.LINK is None:

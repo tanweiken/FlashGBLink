@@ -158,6 +158,31 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(calls, [(100, 0), (0, 1), (50, 1), (100, 1)])
 
 
+    def test_verify_initialize_starts_the_verify_bar(self):
+        # The CRC32 verify path reports UPDATE_POS without a READ, so the
+        # INITIALIZE marker must switch the bar on its own.
+        calls = []
+        original = self.device_module.progress
+        self.device_module.progress = (
+            lambda link, percent, phase=0, timeout=2.0:
+            calls.append((percent, phase)))
+        try:
+            self.device._write_active = True
+            self.device._write_total = 1000
+            self.device._verify_phase = False
+            self.device._last_percent = [-1, -1]
+            self.device.SetProgress({"action": "UPDATE_POS", "pos": 1000})
+            self.device.SetProgress({
+                "action": "INITIALIZE", "method": "ROM_WRITE_VERIFY",
+                "size": 1000})
+            self.device.SetProgress({"action": "UPDATE_POS", "pos": 250})
+            self.device.SetProgress({"action": "UPDATE_POS", "pos": 1000})
+            self.device.SetProgress({"action": "FINISHED"})
+        finally:
+            self.device_module.progress = original
+        self.assertEqual(calls, [(100, 0), (0, 1), (25, 1), (100, 1)])
+
+
     def test_write_rom_skips_ff_without_drifting_the_address(self):
         writes = []
         original = self.device_module.write_block
